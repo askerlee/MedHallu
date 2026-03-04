@@ -1,0 +1,61 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "pqa_labeled",
+  "dataset_name": "med_hallu",
+  "dataset_size": 1979216,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/UTAustin-AIHealth/MedHallu@515060458a945c633debc6fd5baac7764416b724/pqa_labeled/train-00000-of-00001.parquet": {
+      "num_bytes": 1116475,
+      "checksum": null
+    }
+  },
+  "download_size": 1116475,
+  "features": {
+    "Question": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "Knowledge": {
+      "feature": {
+        "dtype": "string",
+        "_type": "Value"
+      },
+      "_type": "List"
+    },
+    "Ground Truth": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "Difficulty Level": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "Hallucinated Answer": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "Category of Hallucination": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 3095691,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 1979216,
+      "num_examples": 1000,
+      "dataset_name": "med_hallu"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
