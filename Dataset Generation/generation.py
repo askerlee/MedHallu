@@ -6,7 +6,7 @@ import json
 import numpy as np
 import openai
 from openai import OpenAI
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from sentence_transformers import SentenceTransformer, util
 import re
 import torch
@@ -41,7 +41,7 @@ class ModelConfig:
 # ============ Hyperparameters and Configuration ============
 NUM_GENERATIONS = 5
 BATCH_SIZE = 9000
-GENERATOR_MODEL_ID = "Qwen/Qwen2.5-14B-Instruct"
+GENERATOR_MODEL_ID = "Qwen/Qwen3.5-27B"
 # TEMPERATURE = 0.8
 GENERATOR_TEMPERATURE = 0.8
 DISCRIMINATOR_TEMPERATURE = 0.3
@@ -62,19 +62,19 @@ GENERATOR_CONFIG = ModelConfig(
 DISCRIMINATOR_CONFIGS = [
     ModelConfig(
         model_type=ModelType.OPENAI, 
-        model_id="gpt-4o-mini",
+        model_id="gpt-5-mini",
         temperature=DISCRIMINATOR_TEMPERATURE
     ),
     ModelConfig(
         model_type=ModelType.HUGGINGFACE, 
-        model_id="google/gemma-2-2b-it",
+        model_id="google/gemma-3-4b-it",
         temperature=DISCRIMINATOR_TEMPERATURE,
         top_p=TOP_P,
         max_tokens = 4,
     ),
     ModelConfig(
         model_type=ModelType.HUGGINGFACE, 
-        model_id="Qwen/Qwen2.5-3B-Instruct",
+        model_id="Qwen/Qwen3.5-9B",
         temperature=DISCRIMINATOR_TEMPERATURE,
         top_p=TOP_P,
         max_tokens = 4
@@ -92,6 +92,153 @@ def load_prompt(file_path):
         raise FileNotFoundError(f"System prompt file not found at: {file_path}")
     except IOError as e:
         raise IOError(f"Error reading system prompt file: {str(e)}")
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse runtime arguments."""
+    parser = argparse.ArgumentParser(description="Generate MedHallu samples from PubMedQA or local MedQA JSON.")
+    parser.add_argument(
+        "--medqa-json-path",
+        type=str,
+        default=None,
+        help="Optional local path to a MedQA-style JSON file.",
+    )
+    parser.add_argument(
+        "--medqa-split",
+        type=str,
+        default='test',
+        help="Optional split value from the MedQA JSON to keep, for example 'test'.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE,
+        help="Maximum number of examples to process.",
+    )
+    parser.add_argument(
+        "--openai-key",
+        type=str,
+        default=" ",  # Placeholder for OpenAI API key
+        help="OpenAI API key for using OpenAI models as discriminators.",
+    )
+    
+    return parser.parse_args()
+
+
+def _extract_text_field(value: Any) -> str:
+    """Extract text from a plain string or nested {'text': ...} object."""
+    if isinstance(value, dict):
+        value = value.get("text", "")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _extract_optional_context_text(example: Dict[str, Any]) -> str:
+    """Extract a best-effort context field without leaking the gold answer."""
+    candidate_values = [
+        example.get("context"),
+        example.get("knowledge"),
+        example.get("evidence"),
+        example.get("support"),
+        example.get("explanation"),
+        example.get("rationale"),
+    ]
+
+    input_value = example.get("input")
+    if isinstance(input_value, dict):
+        candidate_values.extend([
+            input_value.get("context"),
+            input_value.get("knowledge"),
+            input_value.get("evidence"),
+            input_value.get("support"),
+        ])
+
+    for value in candidate_values:
+        if isinstance(value, list):
+            joined_value = "\n".join(
+                text for text in (_extract_text_field(item) for item in value) if text
+            )
+            if joined_value:
+                return joined_value
+            continue
+
+        text = _extract_text_field(value)
+        if text:
+            return text
+
+    return ""
+
+
+def _extract_correct_reference_text(references: Any) -> str:
+    """Return the tagged correct answer text, or the first reference as a fallback."""
+    if not isinstance(references, list):
+        return ""
+
+    fallback_text = ""
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+
+        reference_text = _extract_text_field(reference.get("output"))
+        if reference_text and not fallback_text:
+            fallback_text = reference_text
+
+        tags = reference.get("tags", [])
+        if isinstance(tags, str):
+            tags = [tags]
+
+        if any(str(tag).lower() == "correct" for tag in tags):
+            return reference_text
+
+    return fallback_text
+
+
+def load_medqa_json_dataset(file_path: str, split_name: Optional[str] = None, limit: Optional[int] = None) -> Dataset:
+    """Load a local MedQA JSON file and adapt it to the columns expected by generation.py."""
+    raw_dataset = load_dataset("json", data_files={"train": file_path}, split="train")
+
+    adapted_rows = []
+    for example in raw_dataset:
+        example_split = example.get("split")
+        if split_name and example_split != split_name:
+            continue
+
+        question = _extract_text_field(example.get("input"))
+        context = _extract_optional_context_text(example)
+        correct_answer = _extract_correct_reference_text(example.get("references"))
+
+        if not question or not correct_answer:
+            continue
+
+        adapted_rows.append({
+            "question": question,
+            "context": context,
+            "long_answer": correct_answer,
+        })
+
+        if limit is not None and len(adapted_rows) >= limit:
+            break
+
+    if not adapted_rows:
+        split_message = f" for split '{split_name}'" if split_name else ""
+        raise ValueError(f"No valid MedQA records were found in {file_path}{split_message}.")
+
+    return Dataset.from_list(adapted_rows)
+
+
+def load_generation_dataset(medqa_json_path: Optional[str], medqa_split: Optional[str], batch_size: int):
+    """Load the source dataset in the flat schema expected by the generator."""
+    if medqa_json_path:
+        print(f"Loading MedQA JSON from {medqa_json_path}...")
+        return load_medqa_json_dataset(
+            medqa_json_path,
+            split_name=medqa_split,
+            limit=batch_size,
+        )
+
+    print("Loading PubMedQA from the Hugging Face Hub...")
+    return load_dataset("qiaojin/PubMedQA", "pqa_artificial", split=f"train[:{batch_size}]")
 
 # ============ LLM Wrapper Class ============
 class LLMWrapper:
@@ -141,18 +288,16 @@ class LLMWrapper:
 
     def _generate_openai(self, messages: List[Dict[str, str]]) -> str:
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.responses.create(
                 model=self.config.model_id,
-                messages=messages,
-                max_tokens=self.config.max_tokens,
-                n=1,
-                temperature=self.config.temperature,
+                input=messages,
+                max_output_tokens=self.config.max_tokens,
             )
-            return response.choices[0].message.content.strip()
+            return response.output_text.strip()
         except Exception as e:
             print(f"Error in OpenAI generation: {e}")
             return ""
-
+        
     def _generate_hf(self, messages: str, max_new_tokens: int = None) -> str:
         try:
             tokens = max_new_tokens if max_new_tokens else self.config.max_tokens
@@ -174,6 +319,41 @@ class LLMWrapper:
         except Exception as e:
             print(f"Error in HuggingFace generation: {e}")
             return ""
+
+
+class TextGradOpenAIEngine(tg.EngineLM):
+    """TextGrad engine wrapper that uses an explicit OpenAI API key."""
+
+    DEFAULT_SYSTEM_PROMPT = "You are a helpful, creative, and smart assistant."
+
+    def __init__(self, api_key: str, model_string: str = "gpt-5-mini"):
+        cleaned_api_key = api_key.strip() if api_key else ""
+        if not cleaned_api_key:
+            raise ValueError("An OpenAI API key is required for TextGrad optimization.")
+
+        self.client = OpenAI(api_key=cleaned_api_key)
+        self.model_string = model_string
+        self.system_prompt = self.DEFAULT_SYSTEM_PROMPT
+
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: int = 2000,
+        **kwargs: Any,
+    ) -> str:
+        response = self.client.responses.create(
+            model=self.model_string,
+            input=[
+                {"role": "system", "content": system_prompt or self.system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            max_output_tokens=max_tokens,
+        )
+        return response.output_text.strip()
+
+    def __call__(self, prompt: str, **kwargs: Any) -> str:
+        return self.generate(prompt, **kwargs)
 
 # ============ Utility Functions ============
 def calculate_semantic_similarity(text1: str, text2: str, model: SentenceTransformer) -> float:
@@ -290,10 +470,20 @@ def initialize_models(openai_api_key: str = "", hf_model_id: str = GENERATOR_MOD
         print(f"Error initializing models: {e}")
         raise
 
-def setup_textgrad_optimization(failed_text: str, question: str, knowledge: str) -> tg.Variable:
+def setup_textgrad_optimization(
+    failed_text: str,
+    question: str,
+    knowledge: str,
+    openai_api_key: str = "",
+) -> Tuple[tg.Variable, tg.Variable]:
     """Setup TextGrad optimization for failed hallucination."""
-    # Set GPT-4 as the backward engine for gradient computation
-    tg.set_backward_engine("gpt-4o-mini", override=True)
+    if openai_api_key and openai_api_key.strip():
+        tg.set_backward_engine(
+            TextGradOpenAIEngine(api_key=openai_api_key, model_string="gpt-5-mini"),
+            override=True,
+        )
+    else:
+        tg.set_backward_engine("gpt-4o-mini", override=True)
     
     # Create variable for the failed attempt
     failed_attempt = tg.Variable(
@@ -332,12 +522,18 @@ def create_textgrad_loss(question: str) -> tg.TextLoss:
 def improve_hallucination_with_textgrad(
     failed_text: str,
     question: str,
-    knowledge: str
+    knowledge: str,
+    openai_api_key: str = "",
 ) -> str:
     """Improve failed hallucination using TextGrad optimization."""
     try:
         # Setup TextGrad variables
-        failed_attempt, context = setup_textgrad_optimization(failed_text, question, knowledge)
+        failed_attempt, context = setup_textgrad_optimization(
+            failed_text,
+            question,
+            knowledge,
+            openai_api_key=openai_api_key,
+        )
         
         # Create optimizer
         optimizer = tg.TGD(parameters=[failed_attempt])
@@ -412,7 +608,8 @@ def generate_hallucinations(
     ground_truth: str, 
     generator_wrapper: LLMWrapper,
     discriminator_wrappers: List[LLMWrapper],
-    sent_model: SentenceTransformer
+    sent_model: SentenceTransformer,
+    openai_api_key: str = "",
 ) -> Tuple[List[Dict], Optional[str], DifficultyLevel]:
     """Generate and evaluate hallucinations with TextGrad-based improvement."""
     hallucinations = []
@@ -470,7 +667,10 @@ def generate_hallucinations(
             print(f"Attempt failed. Using TextGrad to improve...")
             try:
                 improved_text = improve_hallucination_with_textgrad(
-                    long_answer, question, knowledge
+                    long_answer,
+                    question,
+                    knowledge,
+                    openai_api_key=openai_api_key,
                 )
                 
                 # Generate based on TextGrad's improvements
@@ -550,24 +750,25 @@ def generate_hallucinations(
 # ============ Main Function ============
 def main():
     """Main execution function."""
+    args = parse_args()
     
     # Update global variables based on arguments
     global SYSTEM_PROMPT, SYSTEM_PROMPT_DETECTION, BATCH_SIZE, OUTPUT_FILE, CHECKPOINT_FILE
     SYSTEM_PROMPT = load_prompt("./Prompts/system_prompt_medical.txt")
     SYSTEM_PROMPT_DETECTION = load_prompt("./Prompts/system_prompt_detection.txt")
-    BATCH_SIZE = 9000
+    BATCH_SIZE = args.batch_size
     OUTPUT_FILE = os.path.join(" ", '') # Placeholder for output file path
     CHECKPOINT_FILE = os.path.join(" ", ' ') # Placeholder for checkpoint file path
     
     print("Initializing models...")
     generator_wrapper, discriminator_wrappers, sent_model = initialize_models(
-        openai_api_key=" ",  # Placeholder for OpenAI API key
+        openai_api_key=args.openai_key,  # Placeholder for OpenAI API key
     )
     
     results_df = create_empty_results_df()
     
     print("Loading dataset...")
-    df = load_dataset("qiaojin/PubMedQA", "pqa_artificial", split=f"train[:{BATCH_SIZE}]")
+    df = load_generation_dataset(args.medqa_json_path, args.medqa_split, BATCH_SIZE)
     
     print(f"Processing {len(df['question'])} questions...")
     for i in tqdm(range(len(df['question']))):
@@ -579,7 +780,10 @@ def main():
             print(f"\nProcessing question {i+1}/{len(df['question'])}...")
             hallucinations, least_similar_answer, final_difficulty = generate_hallucinations(
                 question, knowledge, ground_truth, 
-                generator_wrapper, discriminator_wrappers, sent_model
+                generator_wrapper,
+                discriminator_wrappers,
+                sent_model,
+                openai_api_key=args.openai_key,
             )
             
             row_data = {
