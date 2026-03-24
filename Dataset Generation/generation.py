@@ -13,7 +13,7 @@ import re
 import torch
 from transformers import pipeline, set_seed
 import multiprocessing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Optional, Union, List, Dict, Any, Tuple
 from enum import Enum
@@ -40,6 +40,13 @@ class ModelConfig:
     torch_dtype: torch.dtype = torch.bfloat16
     top_p: float = 0.9
     do_sample: bool = True
+
+
+@dataclass
+class TextGradState:
+    replay_engine: Optional[tg.EngineLM] = None
+    optimization_results_by_question: Dict[str, List[str]] = field(default_factory=lambda: defaultdict(list))
+    optimization_cursor_by_question: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -69,11 +76,6 @@ DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE = os.path.join(
     "logs",
     "2026-03-17_17-40-27.optimizations.jsonl",
 )
-TEXTGRAD_REPLAY_ENGINE = None
-TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION: Dict[str, List[str]] = defaultdict(list)
-TEXTGRAD_OPTIMIZATION_CURSOR_BY_QUESTION: Dict[str, int] = defaultdict(int)
-DETERMINISTIC_MODE = False
-RANDOM_SEED: Optional[int] = None
 
 GENERATOR_CONFIG = ModelConfig(
     model_type=ModelType.HUGGINGFACE,
@@ -255,18 +257,22 @@ def load_textgrad_optimization_results(file_path: str) -> Dict[str, List[str]]:
     return results_by_question
 
 
-def get_cached_textgrad_result(question: str) -> Optional[str]:
+def get_cached_textgrad_result(
+    question: str,
+    optimization_results_by_question: Dict[str, List[str]],
+    optimization_cursor_by_question: Dict[str, int],
+) -> Optional[str]:
     """Return the next cached TextGrad optimization result for a question, if available."""
     question_key = normalize_question_key(question)
-    cached_results = TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION.get(question_key)
+    cached_results = optimization_results_by_question.get(question_key)
     if not cached_results:
         return None
 
-    cursor = TEXTGRAD_OPTIMIZATION_CURSOR_BY_QUESTION[question_key]
+    cursor = optimization_cursor_by_question[question_key]
     if cursor >= len(cached_results):
         return None
 
-    TEXTGRAD_OPTIMIZATION_CURSOR_BY_QUESTION[question_key] += 1
+    optimization_cursor_by_question[question_key] += 1
     question_excerpt = question.strip().replace("\n", " ")[:120]
     print(
         f"Using cached TextGrad optimization {cursor + 1}/{len(cached_results)} "
@@ -739,16 +745,19 @@ def determine_difficulty(discriminator_results: List[bool]) -> DifficultyLevel:
     else:
         return DifficultyLevel.EASY
 
-def create_empty_results_df() -> pd.DataFrame:
+def create_empty_results_df(
+    num_generations: int,
+    discriminator_configs: List[ModelConfig],
+) -> pd.DataFrame:
     """Create an empty DataFrame with the required columns including per-discriminator results."""
     columns = ['question', 'knowledge', 'ground_truth']
     
-    for i in range(NUM_GENERATIONS):
+    for i in range(num_generations):
         columns.extend([
             f'hallucinated_answer_{i+1}', 
             f'justification_{i+1}'
         ])
-        for j, config in enumerate(DISCRIMINATOR_CONFIGS):
+        for j, config in enumerate(discriminator_configs):
             columns.append(f'fooled_discriminator_{j+1}_{i+1}')
         columns.append(f'difficulty_level_{i+1}')
     
@@ -762,10 +771,9 @@ def ensure_parent_directory(file_path: str) -> None:
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
 
-def save_checkpoint(df: pd.DataFrame, filename: Optional[str] = None):
+def save_checkpoint(df: pd.DataFrame, checkpoint_path: str):
     """Save the current state of the DataFrame to a checkpoint file."""
     try:
-        checkpoint_path = filename or CHECKPOINT_FILE
         ensure_parent_directory(checkpoint_path)
         df.to_csv(checkpoint_path, index=False)
         print(f"Checkpoint saved to {checkpoint_path}")
@@ -811,6 +819,7 @@ def setup_textgrad_optimization(
     failed_text: str,
     question: str,
     knowledge: str,
+    textgrad_replay_engine: Optional[tg.EngineLM],
     openai_api_key: str = "",
 ) -> Tuple[tg.Variable, tg.Variable]:
     """Setup TextGrad optimization for failed hallucination."""
@@ -822,9 +831,9 @@ def setup_textgrad_optimization(
     else:
         live_textgrad_engine = tg.get_engine("gpt-4o-mini")
 
-    if TEXTGRAD_REPLAY_ENGINE is not None:
-        TEXTGRAD_REPLAY_ENGINE.set_fallback_engine(live_textgrad_engine)
-        tg.set_backward_engine(TEXTGRAD_REPLAY_ENGINE, override=True)
+    if textgrad_replay_engine is not None:
+        textgrad_replay_engine.set_fallback_engine(live_textgrad_engine)
+        tg.set_backward_engine(textgrad_replay_engine, override=True)
     else:
         tg.set_backward_engine(live_textgrad_engine, override=True)
     
@@ -866,11 +875,16 @@ def improve_hallucination_with_textgrad(
     failed_text: str,
     question: str,
     knowledge: str,
+    textgrad_state: TextGradState,
     openai_api_key: str = "",
 ) -> str:
     """Improve failed hallucination using TextGrad optimization."""
     try:
-        cached_result = get_cached_textgrad_result(question)
+        cached_result = get_cached_textgrad_result(
+            question,
+            textgrad_state.optimization_results_by_question,
+            textgrad_state.optimization_cursor_by_question,
+        )
         if cached_result is not None:
             return cached_result
 
@@ -879,6 +893,7 @@ def improve_hallucination_with_textgrad(
             failed_text,
             question,
             knowledge,
+            textgrad_state.replay_engine,
             openai_api_key=openai_api_key,
         )
         
@@ -910,7 +925,8 @@ def improve_hallucination_with_textgrad(
     
 def check_hallu_multiple(
     answer: str, 
-    discriminator_wrappers: List[LLMWrapper]
+    discriminator_wrappers: List[LLMWrapper],
+    detection_system_prompt: str,
 ) -> Tuple[List[bool], Optional[str], Optional[str]]:
     """Check if the hallucinated answer can fool multiple discriminators."""
     print("\nChecking hallucination against multiple discriminators...")
@@ -930,11 +946,11 @@ def check_hallu_multiple(
             try:
                 if wrapper.config.model_type == ModelType.OPENAI:
                     messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT_DETECTION},
+                        {"role": "system", "content": detection_system_prompt},
                         {"role": "user", "content": prompt}
                     ]
                 else:
-                    messages = [{"role": "user", "content": f"{SYSTEM_PROMPT_DETECTION}\n\nUser: {prompt}"}]
+                    messages = [{"role": "user", "content": f"{detection_system_prompt}\n\nUser: {prompt}"}]
                 
                 pred_answer = wrapper.generate(messages)
                 print(f"Discriminator {i+1} answer: {pred_answer}")
@@ -956,19 +972,24 @@ def generate_hallucinations(
     generator_wrapper: LLMWrapper,
     discriminator_wrappers: List[LLMWrapper],
     sent_model: SentenceTransformer,
+    num_generations: int,
+    system_prompt: str,
+    detection_system_prompt: str,
+    textgrad_state: TextGradState,
     openai_api_key: str = "",
 ) -> Tuple[List[Dict], Optional[str], DifficultyLevel]:
     """Generate and evaluate hallucinations with TextGrad-based improvement."""
     hallucinations = []
-    current_system_prompt = SYSTEM_PROMPT
+    current_system_prompt = system_prompt
     best_difficulty = DifficultyLevel.EASY
     attempts_on_current_datapoint = 0
     
-    while attempts_on_current_datapoint < NUM_GENERATIONS:
+    while attempts_on_current_datapoint < num_generations:
         try:
-            print(f"\nAttempt {attempts_on_current_datapoint + 1}/{NUM_GENERATIONS} for current datapoint")
+            print(f"\nAttempt {attempts_on_current_datapoint + 1}/{num_generations} for current datapoint")
             
             # 1. Fresh generation for each attempt
+            # knowledge: 'context' in the row.
             prompt = f"#Question#: {question}\n\n#Knowledge#: {knowledge}\n\n#Ground truth answer#: {ground_truth}\n\n#Hallucinated Answer#:"
             
             if generator_wrapper.config.model_type == ModelType.OPENAI:
@@ -992,7 +1013,9 @@ def generate_hallucinations(
             
             # 2. Check this generation
             discriminator_results, hallucinated_answer, justification = check_hallu_multiple(
-                long_answer, discriminator_wrappers
+                long_answer,
+                discriminator_wrappers,
+                detection_system_prompt,
             )
             
             # If any discriminator is fooled, record and break immediately
@@ -1017,6 +1040,7 @@ def generate_hallucinations(
                     long_answer,
                     question,
                     knowledge,
+                    textgrad_state,
                     openai_api_key=openai_api_key,
                 )
                 
@@ -1034,7 +1058,9 @@ def generate_hallucinations(
                 
                 # Check the improved generation
                 discriminator_results, hallucinated_answer, justification = check_hallu_multiple(
-                    improved_long_answer, discriminator_wrappers
+                    improved_long_answer,
+                    discriminator_wrappers,
+                    detection_system_prompt,
                 )
                 
                 # If TextGrad improvement fooled any discriminator, record and break
@@ -1098,49 +1124,45 @@ def generate_hallucinations(
 def main():
     """Main execution function."""
     args = parse_args()
-    
-    # Update global variables based on arguments
-    global SYSTEM_PROMPT, SYSTEM_PROMPT_DETECTION, BATCH_SIZE, OUTPUT_FILE, CHECKPOINT_FILE, TEXTGRAD_REPLAY_ENGINE, TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION, TEXTGRAD_OPTIMIZATION_CURSOR_BY_QUESTION, DETERMINISTIC_MODE, RANDOM_SEED
-    SYSTEM_PROMPT = load_prompt("./Prompts/system_prompt_medical.txt")
-    SYSTEM_PROMPT_DETECTION = load_prompt("./Prompts/system_prompt_detection.txt")
-    BATCH_SIZE = args.batch_size
-    OUTPUT_FILE = os.path.abspath(args.output_file)
-    CHECKPOINT_FILE = os.path.abspath(args.checkpoint_file)
-    DETERMINISTIC_MODE = args.deterministic
-    RANDOM_SEED = args.seed if args.seed is not None else (0 if args.deterministic else None)
+
+    system_prompt = load_prompt("./Prompts/system_prompt_medical.txt")
+    detection_system_prompt = load_prompt("./Prompts/system_prompt_detection.txt")
+    batch_size = args.batch_size
+    output_file = os.path.abspath(args.output_file)
+    checkpoint_file = os.path.abspath(args.checkpoint_file)
+    random_seed = args.seed if args.seed is not None else (0 if args.deterministic else None)
     configure_model_sampling(args.deterministic)
-    if RANDOM_SEED is not None:
-        configure_runtime_randomness(RANDOM_SEED, args.deterministic)
-    TEXTGRAD_REPLAY_ENGINE = None
-    TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION = defaultdict(list)
-    TEXTGRAD_OPTIMIZATION_CURSOR_BY_QUESTION = defaultdict(int)
+    if random_seed is not None:
+        configure_runtime_randomness(random_seed, args.deterministic)
+
+    textgrad_state = TextGradState()
     if args.textgrad_replay_log:
-        TEXTGRAD_REPLAY_ENGINE = TextGradReplayEngine(args.textgrad_replay_log)
+        textgrad_state.replay_engine = TextGradReplayEngine(args.textgrad_replay_log)
     if args.medqa_json_path and os.path.exists(DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE):
-        TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION = load_textgrad_optimization_results(
+        textgrad_state.optimization_results_by_question = load_textgrad_optimization_results(
             DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE,
         )
         cached_result_count = sum(
-            len(results) for results in TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION.values()
+            len(results) for results in textgrad_state.optimization_results_by_question.values()
         )
         print(
             f"Loaded cached TextGrad optimizations for "
-            f"{len(TEXTGRAD_OPTIMIZATION_RESULTS_BY_QUESTION)} questions "
+            f"{len(textgrad_state.optimization_results_by_question)} questions "
             f"({cached_result_count} results) from {DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE}"
         )
-    ensure_parent_directory(OUTPUT_FILE)
-    ensure_parent_directory(CHECKPOINT_FILE)
+    ensure_parent_directory(output_file)
+    ensure_parent_directory(checkpoint_file)
 
     if args.deterministic:
         print(
-            f"Deterministic mode enabled with seed {RANDOM_SEED}. "
+            f"Deterministic mode enabled with seed {random_seed}. "
             "Hugging Face sampling is disabled and local RNGs are seeded. External API calls are unchanged."
         )
 
-    if TEXTGRAD_REPLAY_ENGINE is not None:
+    if textgrad_state.replay_engine is not None:
         print(
-            f"Loaded TextGrad replay log from {TEXTGRAD_REPLAY_ENGINE.log_path} "
-            f"with {TEXTGRAD_REPLAY_ENGINE.recorded_call_count} recorded responses. "
+            f"Loaded TextGrad replay log from {textgrad_state.replay_engine.log_path} "
+            f"with {textgrad_state.replay_engine.recorded_call_count} recorded responses. "
             "Unmatched prompts will fall back to live TextGrad."
         )
     
@@ -1149,10 +1171,10 @@ def main():
         openai_api_key=args.openai_key,
     )
     
-    results_df = create_empty_results_df()
+    results_df = create_empty_results_df(NUM_GENERATIONS, DISCRIMINATOR_CONFIGS)
     
     print("Loading dataset...")
-    df = load_generation_dataset(args.medqa_json_path, args.medqa_split, BATCH_SIZE)
+    df = load_generation_dataset(args.medqa_json_path, args.medqa_split, batch_size)
     
     print(f"Processing {len(df['question'])} questions...")
     for i in tqdm(range(len(df['question']))):
@@ -1167,6 +1189,10 @@ def main():
                 generator_wrapper,
                 discriminator_wrappers,
                 sent_model,
+                NUM_GENERATIONS,
+                system_prompt,
+                detection_system_prompt,
+                textgrad_state,
                 openai_api_key=args.openai_key,
             )
             
@@ -1191,15 +1217,15 @@ def main():
                     for k in range(len(discriminator_wrappers)):
                         row_data[f'fooled_discriminator_{k+1}_{j+1}'] = False
                     row_data[f'difficulty_level_{j+1}'] = DifficultyLevel.EASY.value
-            
+
             results_df = pd.concat([results_df, pd.DataFrame([row_data])], ignore_index=True)
-            save_checkpoint(results_df)
+            save_checkpoint(results_df, checkpoint_file)
         except Exception as e:
             print(f"Error processing question {i}: {e}")
             continue
-    
-    results_df.to_csv(OUTPUT_FILE, index=False)
-    print(f"Final results saved to {OUTPUT_FILE}")
+
+    results_df.to_csv(output_file, index=False)
+    print(f"Final results saved to {output_file}")
 
 if __name__ == "__main__":
     main()
