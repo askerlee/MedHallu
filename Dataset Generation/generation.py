@@ -55,7 +55,7 @@ def str2bool(v):
 # ============ Hyperparameters and Configuration ============
 NUM_GENERATIONS = 5
 BATCH_SIZE = 9000
-GENERATOR_MODEL_ID = "Qwen/Qwen3.5-27B"
+GENERATOR_MODEL_ID = "Qwen/Qwen3.5-9B"
 # TEMPERATURE = 0.8
 GENERATOR_TEMPERATURE = 0.8
 DISCRIMINATOR_TEMPERATURE = 0.3
@@ -91,7 +91,7 @@ DISCRIMINATOR_CONFIGS = [
     ),
     ModelConfig(
         model_type=ModelType.HUGGINGFACE, 
-        model_id="Qwen/Qwen3.5-9B",
+        model_id="Qwen/Qwen3-4B",
         temperature=DISCRIMINATOR_TEMPERATURE,
         top_p=TOP_P,
         max_tokens = 4
@@ -164,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--openai-key",
         type=str,
-        default=" ",  # Placeholder for OpenAI API key
+        default="",
         help="OpenAI API key for using OpenAI models as discriminators.",
     )
     
@@ -366,7 +366,8 @@ class LLMWrapper:
             raise
 
     def _should_disable_thinking(self) -> bool:
-        return self.config.model_id == "Qwen/Qwen3.5-9B"
+        model_id = self.config.model_id.lower()
+        return model_id.startswith("qwen/qwen3")
 
     def generate(self, messages: Union[str, List[Dict[str, str]]], max_new_tokens: int = None) -> str:
         try:
@@ -378,14 +379,126 @@ class LLMWrapper:
             print(f"Error in generate for {self.config.model_id}: {e}")
             return ""
 
+    @staticmethod
+    def _get_response_value(item: Any, key: str, default: Any = None) -> Any:
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    def _prepare_openai_request(
+        self,
+        messages: Union[str, List[Dict[str, str]]],
+    ) -> Tuple[Optional[str], Union[str, List[Dict[str, str]]]]:
+        if isinstance(messages, str):
+            return None, messages
+
+        instructions = None
+        normalized_messages: List[Dict[str, str]] = []
+
+        for message in messages:
+            role = str(message.get("role", "user"))
+            content = message.get("content", "")
+
+            if role in {"system", "developer"} and instructions is None:
+                instructions = str(content)
+                continue
+
+            if role == "system":
+                role = "developer"
+
+            normalized_messages.append({
+                "role": role,
+                "content": content,
+            })
+
+        return instructions, normalized_messages
+
+    def _extract_openai_response_text(self, response: Any) -> str:
+        output_text = self._get_response_value(response, "output_text", "")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        text_parts = []
+        for output_item in self._get_response_value(response, "output", []) or []:
+            if self._get_response_value(output_item, "type") != "message":
+                continue
+
+            for content_item in self._get_response_value(output_item, "content", []) or []:
+                if self._get_response_value(content_item, "type") != "output_text":
+                    continue
+
+                text = self._get_response_value(content_item, "text", "")
+                if isinstance(text, str) and text.strip():
+                    text_parts.append(text.strip())
+
+        if text_parts:
+            return "\n".join(text_parts)
+
+        print(
+            "OpenAI response contained no text output "
+            f"(status={self._get_response_value(response, 'status')}, "
+            f"error={self._get_response_value(response, 'error')}, "
+            f"incomplete_details={self._get_response_value(response, 'incomplete_details')})"
+        )
+        return ""
+
+    def _openai_reasoning_config(self) -> Optional[Dict[str, str]]:
+        model_id = self.config.model_id.lower()
+        if model_id.startswith("gpt-5") or model_id.startswith("o"):
+            return {"effort": "minimal"}
+        return None
+
+    def _create_openai_response(
+        self,
+        instructions: Optional[str],
+        input_payload: Union[str, List[Dict[str, str]]],
+        max_output_tokens: int,
+    ) -> Any:
+        request_kwargs: Dict[str, Any] = {
+            "model": self.config.model_id,
+            "instructions": instructions,
+            "input": input_payload,
+            "max_output_tokens": max_output_tokens,
+            "text": {"verbosity": "low"},
+        }
+
+        reasoning = self._openai_reasoning_config()
+        if reasoning is not None:
+            request_kwargs["reasoning"] = reasoning
+
+        return self.client.responses.create(**request_kwargs)
+
     def _generate_openai(self, messages: List[Dict[str, str]]) -> str:
         try:
-            response = self.client.responses.create(
-                model=self.config.model_id,
-                input=messages,
+            if self.client is None:
+                raise ValueError("OpenAI client is not configured. Pass --openai-key.")
+
+            instructions, input_payload = self._prepare_openai_request(messages)
+            response = self._create_openai_response(
+                instructions=instructions,
+                input_payload=input_payload,
                 max_output_tokens=self.config.max_tokens,
             )
-            return response.output_text.strip()
+            text = self._extract_openai_response_text(response)
+            if text:
+                return text
+
+            incomplete_details = self._get_response_value(response, "incomplete_details")
+            incomplete_reason = self._get_response_value(incomplete_details, "reason")
+            if incomplete_reason == "max_output_tokens":
+                retry_max_tokens = max(self.config.max_tokens * 4, 256)
+                print(
+                    f"Retrying OpenAI generation for {self.config.model_id} "
+                    f"with max_output_tokens={retry_max_tokens}"
+                )
+                retry_response = self._create_openai_response(
+                    instructions=instructions,
+                    input_payload=input_payload,
+                    max_output_tokens=retry_max_tokens,
+                )
+                return self._extract_openai_response_text(retry_response)
+
+            return ""
         except Exception as e:
             print(f"Error in OpenAI generation: {e}")
             return ""
@@ -408,12 +521,19 @@ class LLMWrapper:
 
             prompt_input = messages
             if self._should_disable_thinking() and isinstance(messages, list):
-                prompt_input = self.pipe.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
-                )
+                try:
+                    prompt_input = self.pipe.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                except TypeError:
+                    prompt_input = self.pipe.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
 
             outputs = self.pipe(
                 prompt_input,
@@ -643,8 +763,16 @@ def save_checkpoint(df: pd.DataFrame, checkpoint_path: str):
 def initialize_models(openai_api_key: str = "", hf_model_id: str = GENERATOR_MODEL_ID):
     """Initialize all required models."""
     try:
+        cleaned_api_key = openai_api_key.strip() if openai_api_key else ""
+
         # Initialize OpenAI client
-        openai_client = OpenAI(api_key=openai_api_key)
+        requires_openai = any(
+            config.model_type == ModelType.OPENAI for config in DISCRIMINATOR_CONFIGS
+        )
+        if requires_openai and not cleaned_api_key:
+            raise ValueError("This run includes OpenAI discriminators. Please provide --openai-key.")
+
+        openai_client = OpenAI(api_key=cleaned_api_key) if cleaned_api_key else None
         
         # Initialize sentence transformer model
         sent_model = SentenceTransformer('all-MiniLM-L6-v2')
