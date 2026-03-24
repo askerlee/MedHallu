@@ -1,3 +1,4 @@
+import copy
 import os
 import random
 import pandas as pd
@@ -11,10 +12,9 @@ from datasets import Dataset, load_dataset
 from sentence_transformers import SentenceTransformer, util
 import re
 import torch
-from transformers import pipeline, set_seed
+from transformers import GenerationConfig, pipeline, set_seed
 import multiprocessing
-from dataclasses import dataclass, field
-from collections import defaultdict
+from dataclasses import dataclass
 from typing import Optional, Union, List, Dict, Any, Tuple
 from enum import Enum
 import textgrad as tg
@@ -42,12 +42,6 @@ class ModelConfig:
     do_sample: bool = True
 
 
-@dataclass
-class TextGradState:
-    replay_engine: Optional[tg.EngineLM] = None
-    optimization_results_by_question: Dict[str, List[str]] = field(default_factory=lambda: defaultdict(list))
-    optimization_cursor_by_question: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
-
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -71,11 +65,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results"))
 OUTPUT_FILE = os.path.join(RESULTS_DIR, "medhallu_output.csv")
 CHECKPOINT_FILE = os.path.join(RESULTS_DIR, "medhallu_checkpoint.csv")
-DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE = os.path.join(
-    SCRIPT_DIR,
-    "logs",
-    "2026-03-17_17-40-27.optimizations.jsonl",
-)
 
 GENERATOR_CONFIG = ModelConfig(
     model_type=ModelType.HUGGINGFACE,
@@ -143,6 +132,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of examples to process.",
     )
     parser.add_argument(
+        "--num-generations",
+        type=int,
+        default=NUM_GENERATIONS,
+        help="Number of hallucination attempts to generate per question.",
+    )
+    parser.add_argument(
         "--output-file",
         type=str,
         default=OUTPUT_FILE,
@@ -153,12 +148,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=CHECKPOINT_FILE,
         help="Path to the checkpoint CSV file written during generation.",
-    )
-    parser.add_argument(
-        "--textgrad-replay-log",
-        type=str,
-        default=None,
-        help="Optional TextGrad JSONL log file to replay optimization calls without contacting the TextGrad model.",
     )
     parser.add_argument(
         "--deterministic",
@@ -225,61 +214,6 @@ def _extract_text_field(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def normalize_question_key(question: Optional[str]) -> str:
-    """Normalize a question string for cache lookups."""
-    if question is None:
-        return ""
-    return re.sub(r"\s+", " ", str(question)).strip().lower()
-
-
-def load_textgrad_optimization_results(file_path: str) -> Dict[str, List[str]]:
-    """Load extracted TextGrad optimization outputs keyed by normalized question."""
-    results_by_question: Dict[str, List[str]] = defaultdict(list)
-
-    with open(file_path, 'r', encoding='utf-8') as file:
-        for raw_line in file:
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            question_key = normalize_question_key(record.get("question"))
-            optimized_text = _extract_text_field(record.get("final_updated_text"))
-            if question_key and optimized_text:
-                results_by_question[question_key].append(optimized_text)
-
-    return results_by_question
-
-
-def get_cached_textgrad_result(
-    question: str,
-    optimization_results_by_question: Dict[str, List[str]],
-    optimization_cursor_by_question: Dict[str, int],
-) -> Optional[str]:
-    """Return the next cached TextGrad optimization result for a question, if available."""
-    question_key = normalize_question_key(question)
-    cached_results = optimization_results_by_question.get(question_key)
-    if not cached_results:
-        return None
-
-    cursor = optimization_cursor_by_question[question_key]
-    if cursor >= len(cached_results):
-        return None
-
-    optimization_cursor_by_question[question_key] += 1
-    question_excerpt = question.strip().replace("\n", " ")[:120]
-    print(
-        f"Using cached TextGrad optimization {cursor + 1}/{len(cached_results)} "
-        f"for question: {question_excerpt}"
-    )
-    return cached_results[cursor]
-
 
 def _extract_optional_context_text(example: Dict[str, Any]) -> str:
     """Extract a best-effort context field without leaking the gold answer."""
@@ -407,6 +341,10 @@ class LLMWrapper:
                 model_kwargs={"torch_dtype": self.config.torch_dtype},
                 device_map="auto"
             )
+            default_generation_config = GenerationConfig.from_model_config(self.pipe.model.config)
+            default_generation_config.max_length = None
+            self.pipe.model.generation_config = default_generation_config
+            self.pipe.generation_config = default_generation_config
             if "llama" in self.config.model_id.lower():
                 self.terminators = [
                     self.pipe.tokenizer.eos_token_id,
@@ -422,6 +360,9 @@ class LLMWrapper:
         except Exception as e:
             print(f"Error setting up HF pipeline for {self.config.model_id}: {e}")
             raise
+
+    def _should_disable_thinking(self) -> bool:
+        return self.config.model_id == "Qwen/Qwen3.5-9B"
 
     def generate(self, messages: Union[str, List[Dict[str, str]]], max_new_tokens: int = None) -> str:
         try:
@@ -445,20 +386,36 @@ class LLMWrapper:
             print(f"Error in OpenAI generation: {e}")
             return ""
         
-    def _generate_hf(self, messages: str, max_new_tokens: int = None) -> str:
+    def _generate_hf(self, messages: Union[str, List[Dict[str, str]]], 
+                     max_new_tokens: int = None) -> str:
         try:
-            tokens = max_new_tokens if max_new_tokens else self.config.max_tokens
-            generation_kwargs = {
-                "max_new_tokens": tokens,
-                "eos_token_id": self.terminators,
-                "return_full_text": False,
-                "do_sample": self.config.do_sample,
-            }
+            max_new_tokens = max_new_tokens if max_new_tokens else self.config.max_tokens
+            generation_config = copy.deepcopy(self.pipe.model.generation_config)
+            generation_config.max_new_tokens = max_new_tokens
+            generation_config.max_length = None
+            generation_config.eos_token_id = self.terminators
+            generation_config.do_sample = self.config.do_sample
             if self.config.do_sample:
-                generation_kwargs["temperature"] = self.config.temperature
-                generation_kwargs["top_p"] = self.config.top_p
+                generation_config.temperature = self.config.temperature
+                generation_config.top_p = self.config.top_p
+            else:
+                generation_config.temperature = None
+                generation_config.top_p = None
 
-            outputs = self.pipe(messages, **generation_kwargs)
+            prompt_input = messages
+            if self._should_disable_thinking() and isinstance(messages, list):
+                prompt_input = self.pipe.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+
+            outputs = self.pipe(
+                prompt_input,
+                generation_config=generation_config,
+                return_full_text=False,
+            )
             
             # HuggingFace pipeline returns a list of dictionaries with 'generated_text' key
             if isinstance(outputs, list) and len(outputs) > 0:
@@ -470,23 +427,25 @@ class LLMWrapper:
             return ""
 
 
-class TextGradOpenAIEngine(tg.EngineLM):
-    """TextGrad engine wrapper that uses an explicit OpenAI API key."""
+class TextGradOptimizer(tg.EngineLM):
+    """Encapsulate TextGrad engine setup and hallucination optimization."""
 
     DEFAULT_SYSTEM_PROMPT = "You are a helpful, creative, and smart assistant."
 
-    def __init__(
-        self,
-        api_key: str,
-        model_string: str = "gpt-5-mini",
-    ):
-        cleaned_api_key = api_key.strip() if api_key else ""
-        if not cleaned_api_key:
-            raise ValueError("An OpenAI API key is required for TextGrad optimization.")
-
-        self.client = OpenAI(api_key=cleaned_api_key)
+    def __init__(self, openai_api_key: str = "", model_string: str = "gpt-5-mini"):
+        self.openai_api_key = openai_api_key
         self.model_string = model_string
         self.system_prompt = self.DEFAULT_SYSTEM_PROMPT
+        self.client = None
+
+        cleaned_api_key = openai_api_key.strip() if openai_api_key else ""
+        if cleaned_api_key:
+            self.client = OpenAI(api_key=cleaned_api_key)
+
+    def _create_engine(self) -> tg.EngineLM:
+        if self.openai_api_key and self.openai_api_key.strip():
+            return self
+        return tg.get_engine("gpt-4o-mini")
 
     def generate(
         self,
@@ -495,6 +454,9 @@ class TextGradOpenAIEngine(tg.EngineLM):
         max_tokens: int = 2000,
         **kwargs: Any,
     ) -> str:
+        if self.client is None:
+            raise ValueError("An OpenAI API key is required for TextGrad optimization.")
+
         response = self.client.responses.create(
             model=self.model_string,
             input=[
@@ -508,187 +470,77 @@ class TextGradOpenAIEngine(tg.EngineLM):
     def __call__(self, prompt: str, **kwargs: Any) -> str:
         return self.generate(prompt, **kwargs)
 
-
-class TextGradReplayEngine(tg.EngineLM):
-    """Replay TextGrad model outputs from a JSONL log produced by TextGrad."""
-
-    DEFAULT_SYSTEM_PROMPT = "You are a helpful, creative, and smart assistant."
-
-    def __init__(self, log_path: str):
-        resolved_log_path = os.path.abspath(log_path)
-        if not os.path.exists(resolved_log_path):
-            raise FileNotFoundError(f"TextGrad replay log not found: {resolved_log_path}")
-
-        self.log_path = resolved_log_path
-        self.model_string = f"textgrad-replay:{os.path.basename(resolved_log_path)}"
-        self.system_prompt = self.DEFAULT_SYSTEM_PROMPT
-        self._responses_by_key: Dict[Tuple[str, str], List[str]] = defaultdict(list)
-        self._keys_by_prompt: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-        self._cursor_by_key: Dict[Tuple[str, str], int] = defaultdict(int)
-        self.fallback_engine: Optional[tg.EngineLM] = None
-        self.live_fallback_call_count = 0
-        self.recorded_call_count = 0
-        self._load_log()
-
-    @staticmethod
-    def _normalize_text(value: Optional[str]) -> str:
-        if value is None:
-            return ""
-        return str(value).strip()
-
-    @staticmethod
-    def _parse_llm_forward_text(text: str) -> Tuple[str, str, str]:
-        query_marker = "\nQuery: "
-        response_marker = "\nResponse: "
-        if not text.startswith("System:") or query_marker not in text or response_marker not in text:
-            raise ValueError("Unsupported TextGrad forward log format.")
-
-        remainder = text[len("System:"):]
-        system_prompt, prompt_and_response = remainder.split(query_marker, 1)
-        prompt, response = prompt_and_response.rsplit(response_marker, 1)
-        return system_prompt, prompt, response
-
-    def _store_response(
+    def _setup_optimization(
         self,
-        prompt: str,
-        response: str,
-        system_prompt: Optional[str] = None,
-        *,
-        count_recorded: bool = True,
-    ) -> None:
-        normalized_prompt = self._normalize_text(prompt)
-        normalized_system_prompt = self._normalize_text(system_prompt)
-        key = (normalized_system_prompt, normalized_prompt)
-        self._responses_by_key[key].append(response)
-        if key not in self._keys_by_prompt[normalized_prompt]:
-            self._keys_by_prompt[normalized_prompt].append(key)
-        if count_recorded:
-            self.recorded_call_count += 1
+        failed_text: str,
+        question: str,
+        knowledge: str,
+    ) -> tg.Variable:
+        """Configure TextGrad state for a failed hallucination attempt."""
+        live_textgrad_engine = self._create_engine()
+        tg.set_backward_engine(live_textgrad_engine, override=True)
 
-    def set_fallback_engine(self, engine: Optional[tg.EngineLM]) -> None:
-        self.fallback_engine = engine
-
-    def _load_log(self) -> None:
-        pending_backward_prompt: Optional[str] = None
-        pending_optimizer_prompt: Optional[str] = None
-
-        with open(self.log_path, 'r', encoding='utf-8') as file:
-            for raw_line in file:
-                line = raw_line.strip()
-                if not line:
-                    continue
-
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                message = str(record.get('msg') or record.get('message') or '').strip()
-
-                if message == 'LLMCall function forward':
-                    llm_text = record.get('text')
-                    if not llm_text:
-                        continue
-                    try:
-                        system_prompt, prompt, response = self._parse_llm_forward_text(str(llm_text))
-                    except ValueError:
-                        continue
-                    self._store_response(prompt, response, system_prompt=system_prompt)
-                    continue
-
-                if message == '_backward_through_llm prompt':
-                    pending_backward_prompt = self._normalize_text(record.get('_backward_through_llm'))
-                    continue
-
-                if message == '_backward_through_llm gradient':
-                    if pending_backward_prompt:
-                        self._store_response(
-                            pending_backward_prompt,
-                            self._normalize_text(record.get('_backward_through_llm')),
-                        )
-                        pending_backward_prompt = None
-                    continue
-
-                if message == 'TextualGradientDescent prompt for update':
-                    pending_optimizer_prompt = self._normalize_text(record.get('prompt'))
-                    continue
-
-                if message == 'TextualGradientDescent optimizer response':
-                    if pending_optimizer_prompt:
-                        self._store_response(
-                            pending_optimizer_prompt,
-                            self._normalize_text(record.get('optimizer.response')),
-                        )
-                        pending_optimizer_prompt = None
-
-        if self.recorded_call_count == 0:
-            raise ValueError(f"No replayable TextGrad calls were found in {self.log_path}")
-
-    def _resolve_key(self, prompt: str, system_prompt: Optional[str]) -> Tuple[str, str]:
-        normalized_prompt = self._normalize_text(prompt)
-        normalized_system_prompt = self._normalize_text(system_prompt)
-        exact_key = (normalized_system_prompt, normalized_prompt)
-        if exact_key in self._responses_by_key:
-            return exact_key
-
-        candidate_keys = self._keys_by_prompt.get(normalized_prompt, [])
-        if len(candidate_keys) == 1:
-            return candidate_keys[0]
-
-        if not candidate_keys:
-            raise KeyError(
-                "No recorded TextGrad response matched the current replay prompt. "
-                f"Prompt excerpt: {normalized_prompt[:160]}"
-            )
-
-        raise KeyError(
-            "Multiple recorded TextGrad responses matched the current replay prompt. "
-            "Add a more specific replay log or re-run with exact prompt parity."
+        failed_attempt = tg.Variable(
+            failed_text,
+            requires_grad=True,
+            role_description="hallucinated answer that needs improvement"
         )
 
-    def generate(
+        tg.Variable(
+            f"Question: {question}\nKnowledge Context: {knowledge}",
+            requires_grad=False,
+            role_description="context for hallucination generation"
+        )
+
+        return failed_attempt
+
+    def create_loss(self, question: str) -> tg.TextLoss:
+        """Create a TextGrad loss function for hallucination evaluation."""
+        evaluation_instruction = tg.Variable(
+            f"""Evaluate the given hallucinated answer for this question: {question}
+        Consider:
+        1. Plausibility given the context, is it on-topic and relevant?
+        2. Internal consistency, does the answer make sense and is it logically coherent?
+        3. Use of domain-specific terminology
+        4. How easy is it for the discriminator to detect the answer as a hallucination?
+        
+        Provide specific feedback on how to improve the answer to make it more convincing.
+        Be concise and direct.""",
+            requires_grad=False,
+            role_description="evaluation instructions"
+        )
+
+        return tg.TextLoss(evaluation_instruction)
+
+    def improve_hallucination(
         self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        **kwargs: Any,
+        failed_text: str,
+        question: str,
+        knowledge: str,
     ) -> str:
+        """Improve a failed hallucination attempt with TextGrad."""
         try:
-            key = self._resolve_key(prompt, system_prompt)
-            response_index = self._cursor_by_key[key]
-            responses = self._responses_by_key[key]
-
-            if response_index >= len(responses):
-                raise RuntimeError(
-                    "TextGrad replay log does not contain enough recorded responses for this prompt. "
-                    f"Prompt excerpt: {key[1][:160]}"
-                )
-
-            self._cursor_by_key[key] += 1
-            return responses[response_index]
-        except (KeyError, RuntimeError) as replay_error:
-            if self.fallback_engine is None:
-                raise
-
-            print(
-                "TextGrad replay miss. Falling back to live TextGrad engine. "
-                f"Reason: {replay_error}"
+            failed_attempt = self._setup_optimization(
+                failed_text,
+                question,
+                knowledge,
             )
-            response = self.fallback_engine.generate(
-                prompt,
-                system_prompt=system_prompt,
-                **kwargs,
-            )
-            self._store_response(
-                prompt,
-                response,
-                system_prompt=system_prompt,
-                count_recorded=False,
-            )
-            self.live_fallback_call_count += 1
-            return response
 
-    def __call__(self, prompt: str, **kwargs: Any) -> str:
-        return self.generate(prompt, **kwargs)
+            optimizer = tg.TGD(parameters=[failed_attempt])
+            loss_fn = self.create_loss(question)
+
+            for _ in range(3):
+                loss = loss_fn(failed_attempt)
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+
+            return failed_attempt.value
+
+        except Exception as e:
+            print(f"Error in TextGrad optimization: {e}")
+            return failed_text
+
 
 # ============ Utility Functions ============
 def calculate_semantic_similarity(text1: str, text2: str, model: SentenceTransformer) -> float:
@@ -704,7 +556,10 @@ def calculate_semantic_similarity(text1: str, text2: str, model: SentenceTransfo
     except Exception as e:
         print(f"Error in semantic similarity calculation: {e}")
         return 0.0
-    
+
+# option1: GT answer, option2: hallucinated answer + justification.
+# Check if the LLM discriminator prefers the hallucinated answer or the ground truth answer, 
+# given the question and knowledge context.
 def create_prompt(question: str, option1: str, option2: str, justification: str) -> str:
     """Create a prompt for the discriminator model."""
     prompt = f"""
@@ -814,114 +669,6 @@ def initialize_models(openai_api_key: str = "", hf_model_id: str = GENERATOR_MOD
     except Exception as e:
         print(f"Error initializing models: {e}")
         raise
-
-def setup_textgrad_optimization(
-    failed_text: str,
-    question: str,
-    knowledge: str,
-    textgrad_replay_engine: Optional[tg.EngineLM],
-    openai_api_key: str = "",
-) -> Tuple[tg.Variable, tg.Variable]:
-    """Setup TextGrad optimization for failed hallucination."""
-    if openai_api_key and openai_api_key.strip():
-        live_textgrad_engine = TextGradOpenAIEngine(
-            api_key=openai_api_key,
-            model_string="gpt-5-mini",
-        )
-    else:
-        live_textgrad_engine = tg.get_engine("gpt-4o-mini")
-
-    if textgrad_replay_engine is not None:
-        textgrad_replay_engine.set_fallback_engine(live_textgrad_engine)
-        tg.set_backward_engine(textgrad_replay_engine, override=True)
-    else:
-        tg.set_backward_engine(live_textgrad_engine, override=True)
-    
-    # Create variable for the failed attempt
-    failed_attempt = tg.Variable(
-        failed_text,
-        requires_grad=True,
-        role_description="hallucinated answer that needs improvement"
-    )
-    
-    # Create context variables
-    context = tg.Variable(
-        f"Question: {question}\nKnowledge Context: {knowledge}",
-        requires_grad=False,
-        role_description="context for hallucination generation"
-    )
-    
-    return failed_attempt, context
-
-def create_textgrad_loss(question: str) -> tg.TextLoss:
-    """Create a TextGrad loss function for hallucination evaluation."""
-    evaluation_instruction = tg.Variable(
-        f"""Evaluate the given hallucinated answer for this question: {question}
-        Consider:
-        1. Plausibility given the context, is it on-topic and relevant?
-        2. Internal consistency, does the answer make sense and is it logically coherent?
-        3. Use of domain-specific terminology
-        4. How easy is it for the discriminator to detect the answer as a hallucination?
-        
-        Provide specific feedback on how to improve the answer to make it more convincing.
-        Be concise and direct.""",
-        requires_grad=False,
-        role_description="evaluation instructions"
-    )
-    
-    return tg.TextLoss(evaluation_instruction)
-
-def improve_hallucination_with_textgrad(
-    failed_text: str,
-    question: str,
-    knowledge: str,
-    textgrad_state: TextGradState,
-    openai_api_key: str = "",
-) -> str:
-    """Improve failed hallucination using TextGrad optimization."""
-    try:
-        cached_result = get_cached_textgrad_result(
-            question,
-            textgrad_state.optimization_results_by_question,
-            textgrad_state.optimization_cursor_by_question,
-        )
-        if cached_result is not None:
-            return cached_result
-
-        # Setup TextGrad variables
-        failed_attempt, context = setup_textgrad_optimization(
-            failed_text,
-            question,
-            knowledge,
-            textgrad_state.replay_engine,
-            openai_api_key=openai_api_key,
-        )
-        
-        # Create optimizer
-        optimizer = tg.TGD(parameters=[failed_attempt])
-        
-        # Create loss function
-        loss_fn = create_textgrad_loss(question)
-        
-        # Optimization loop
-        for _ in range(3):  # Multiple optimization steps
-            # Compute loss
-            loss = loss_fn(failed_attempt)
-            
-            # Backward pass
-            loss.backward()
-            
-            # Update the text
-            optimizer.step()
-            
-            # Clear gradients
-            optimizer.zero_grad()
-        
-        return failed_attempt.value
-        
-    except Exception as e:
-        print(f"Error in TextGrad optimization: {e}")
-        return failed_text
     
 def check_hallu_multiple(
     answer: str, 
@@ -975,8 +722,7 @@ def generate_hallucinations(
     num_generations: int,
     system_prompt: str,
     detection_system_prompt: str,
-    textgrad_state: TextGradState,
-    openai_api_key: str = "",
+    textgrad_optimizer: TextGradOptimizer,
 ) -> Tuple[List[Dict], Optional[str], DifficultyLevel]:
     """Generate and evaluate hallucinations with TextGrad-based improvement."""
     hallucinations = []
@@ -1036,12 +782,10 @@ def generate_hallucinations(
             # 3. If no discriminator was fooled, try TextGrad improvement
             print(f"Attempt failed. Using TextGrad to improve...")
             try:
-                improved_text = improve_hallucination_with_textgrad(
+                improved_text = textgrad_optimizer.improve_hallucination(
                     long_answer,
                     question,
                     knowledge,
-                    textgrad_state,
-                    openai_api_key=openai_api_key,
                 )
                 
                 # Generate based on TextGrad's improvements
@@ -1128,6 +872,7 @@ def main():
     system_prompt = load_prompt("./Prompts/system_prompt_medical.txt")
     detection_system_prompt = load_prompt("./Prompts/system_prompt_detection.txt")
     batch_size = args.batch_size
+    num_generations = args.num_generations
     output_file = os.path.abspath(args.output_file)
     checkpoint_file = os.path.abspath(args.checkpoint_file)
     random_seed = args.seed if args.seed is not None else (0 if args.deterministic else None)
@@ -1135,21 +880,6 @@ def main():
     if random_seed is not None:
         configure_runtime_randomness(random_seed, args.deterministic)
 
-    textgrad_state = TextGradState()
-    if args.textgrad_replay_log:
-        textgrad_state.replay_engine = TextGradReplayEngine(args.textgrad_replay_log)
-    if args.medqa_json_path and os.path.exists(DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE):
-        textgrad_state.optimization_results_by_question = load_textgrad_optimization_results(
-            DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE,
-        )
-        cached_result_count = sum(
-            len(results) for results in textgrad_state.optimization_results_by_question.values()
-        )
-        print(
-            f"Loaded cached TextGrad optimizations for "
-            f"{len(textgrad_state.optimization_results_by_question)} questions "
-            f"({cached_result_count} results) from {DEFAULT_TEXTGRAD_OPTIMIZATIONS_FILE}"
-        )
     ensure_parent_directory(output_file)
     ensure_parent_directory(checkpoint_file)
 
@@ -1159,19 +889,13 @@ def main():
             "Hugging Face sampling is disabled and local RNGs are seeded. External API calls are unchanged."
         )
 
-    if textgrad_state.replay_engine is not None:
-        print(
-            f"Loaded TextGrad replay log from {textgrad_state.replay_engine.log_path} "
-            f"with {textgrad_state.replay_engine.recorded_call_count} recorded responses. "
-            "Unmatched prompts will fall back to live TextGrad."
-        )
-    
     print("Initializing models...")
     generator_wrapper, discriminator_wrappers, sent_model = initialize_models(
         openai_api_key=args.openai_key,
     )
+    textgrad_optimizer = TextGradOptimizer(openai_api_key=args.openai_key)
     
-    results_df = create_empty_results_df(NUM_GENERATIONS, DISCRIMINATOR_CONFIGS)
+    results_df = create_empty_results_df(num_generations, DISCRIMINATOR_CONFIGS)
     
     print("Loading dataset...")
     df = load_generation_dataset(args.medqa_json_path, args.medqa_split, batch_size)
@@ -1189,11 +913,10 @@ def main():
                 generator_wrapper,
                 discriminator_wrappers,
                 sent_model,
-                NUM_GENERATIONS,
+                num_generations,
                 system_prompt,
                 detection_system_prompt,
-                textgrad_state,
-                openai_api_key=args.openai_key,
+                textgrad_optimizer,
             )
             
             row_data = {
