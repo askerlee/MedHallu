@@ -1,3 +1,5 @@
 Detection/desc2025.xml
 logs/*
 Dataset Generation/logs/*
+results/*
+*.pyc

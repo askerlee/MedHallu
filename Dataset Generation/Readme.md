@@ -41,12 +41,49 @@ openai_client = OpenAI(api_key="YOUR_OPENAI_API_KEY")  # Line 397
 
 ### File Paths
 
-Replace the following placeholders in `generation.py`:
+`generation.py` now accepts output paths via command-line options.
 
-```python
-OUTPUT_FILE = os.path.join("YOUR_OUTPUT_PATH", "medhallu_dataset.csv")  # Line 127
-CHECKPOINT_FILE = os.path.join("YOUR_CHECKPOINT_PATH", "medhallu_checkpoint.csv")  # Line 128
+Defaults:
+
+```bash
+--output-file ../results/medhallu_output.csv
+--checkpoint-file ../results/medhallu_checkpoint.csv
 ```
+
+To replay previously recorded TextGrad optimization calls from a JSONL log without recontacting the TextGrad model:
+
+```bash
+python generation.py \
+	--medqa-json-path ../medication_qa.json \
+	--medqa-split test \
+	--batch-size 100 \
+	--textgrad-replay-log ./logs/2026-03-17_17-40-27.jsonl
+```
+
+To reduce replay mismatches from fresh local sampling, run in deterministic mode:
+
+```bash
+python generation.py \
+	--medqa-json-path ../medication_qa.json \
+	--medqa-split test \
+	--batch-size 100 \
+	--textgrad-replay-log ./logs/2026-03-17_17-40-27.jsonl \
+	--deterministic \
+	--seed 0
+```
+
+Replay mode reuses recorded TextGrad calls when it finds an exact match. If a prompt is missing from the log or the recorded responses are exhausted, it falls back to live TextGrad for that prompt. Deterministic mode disables Hugging Face sampling and seeds local RNGs, which makes replay mismatches less likely, but it does not change OpenAI or live TextGrad API sampling parameters. The rest of the pipeline, including any non-TextGrad model calls, still runs normally.
+
+When `--medqa-json-path` is used, `generation.py` also checks `./logs/2026-03-17_17-40-27.optimizations.jsonl`. If the current question matches a question in that extracted optimization file, it skips the live TextGrad optimization call and reuses the next cached `final_updated_text` for that question.
+
+To extract the final TextGrad-optimized text from a JSONL log and reconstruct the follow-up prompt used by the generator:
+
+```bash
+python extract_textgrad_optimizations.py \
+	--log-file ./logs/2026-03-17_17-40-27.jsonl
+```
+
+This writes one JSON record per TextGrad optimization run to a sibling file ending in `.optimizations.jsonl`. Use `--include-steps` if you also want the intermediate prompts, gradients, and updates for each optimization step.
 
 ### Model Configuration
 
@@ -63,6 +100,14 @@ To generate the dataset, simply run:
 
 ```bash
 python generation.py
+```
+
+To override the output locations:
+
+```bash
+python generation.py \
+	--output-file /path/to/medhallu_dataset.csv \
+	--checkpoint-file /path/to/medhallu_checkpoint.csv
 ```
 
 This will:
