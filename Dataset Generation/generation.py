@@ -61,6 +61,7 @@ GENERATOR_TEMPERATURE = 0.8
 DISCRIMINATOR_TEMPERATURE = 0.3
 TOP_P = 0.95
 MAX_NEW_TOKENS = 512
+CUBLAS_WORKSPACE_CONFIG_VALUE = ":4096:8"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results"))
 OUTPUT_FILE = os.path.join(RESULTS_DIR, "medhallu_output.csv")
@@ -172,6 +173,9 @@ def parse_args() -> argparse.Namespace:
 
 def configure_runtime_randomness(seed: int, deterministic: bool) -> None:
     """Seed local RNGs and enable deterministic kernels when requested."""
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", CUBLAS_WORKSPACE_CONFIG_VALUE)
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -886,7 +890,9 @@ def main():
     if args.deterministic:
         print(
             f"Deterministic mode enabled with seed {random_seed}. "
-            "Hugging Face sampling is disabled and local RNGs are seeded. External API calls are unchanged."
+            "Hugging Face sampling is disabled, local RNGs are seeded, and "
+            f"CUBLAS_WORKSPACE_CONFIG={os.environ.get('CUBLAS_WORKSPACE_CONFIG', CUBLAS_WORKSPACE_CONFIG_VALUE)}. "
+            "External API calls are unchanged."
         )
 
     print("Initializing models...")
