@@ -39,6 +39,8 @@ class ModelConfig:
     device_map: str = "auto"
     torch_dtype: torch.dtype = torch.bfloat16
     top_p: float = 0.9
+    top_k: Optional[int] = None
+    repetition_penalty: float = 1.0
     do_sample: bool = True
 
 
@@ -57,9 +59,12 @@ NUM_GENERATIONS = 5
 BATCH_SIZE = 9000
 GENERATOR_MODEL_ID = "Qwen/Qwen3.5-9B"
 # TEMPERATURE = 0.8
-GENERATOR_TEMPERATURE = 0.8
+GENERATOR_TEMPERATURE = 1.0
 DISCRIMINATOR_TEMPERATURE = 0.3
-TOP_P = 0.95
+GENERATOR_TOP_P = 0.98
+DISCRIMINATOR_TOP_P = 0.95
+GENERATOR_TOP_K = 50
+GENERATOR_REPETITION_PENALTY = 1.05
 MAX_NEW_TOKENS = 512
 CUBLAS_WORKSPACE_CONFIG_VALUE = ":4096:8"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -72,7 +77,9 @@ GENERATOR_CONFIG = ModelConfig(
     model_id=GENERATOR_MODEL_ID,
     temperature=GENERATOR_TEMPERATURE,
     max_tokens=MAX_NEW_TOKENS,
-    top_p=TOP_P
+    top_p=GENERATOR_TOP_P,
+    top_k=GENERATOR_TOP_K,
+    repetition_penalty=GENERATOR_REPETITION_PENALTY,
 )
 
 # Discriminator configurations
@@ -86,14 +93,14 @@ DISCRIMINATOR_CONFIGS = [
         model_type=ModelType.HUGGINGFACE, 
         model_id="google/gemma-3-4b-it",
         temperature=DISCRIMINATOR_TEMPERATURE,
-        top_p=TOP_P,
+        top_p=DISCRIMINATOR_TOP_P,
         max_tokens = 4,
     ),
     ModelConfig(
         model_type=ModelType.HUGGINGFACE, 
         model_id="Qwen/Qwen3-4B",
         temperature=DISCRIMINATOR_TEMPERATURE,
-        top_p=TOP_P,
+        top_p=DISCRIMINATOR_TOP_P,
         max_tokens = 4
     )
 ]
@@ -197,17 +204,23 @@ def configure_runtime_randomness(seed: int, deterministic: bool) -> None:
 def configure_model_sampling(deterministic: bool) -> None:
     """Apply runtime sampling settings to generator and discriminator configs."""
     GENERATOR_CONFIG.temperature = 0.0 if deterministic else GENERATOR_TEMPERATURE
-    GENERATOR_CONFIG.top_p = 1.0 if deterministic else TOP_P
+    GENERATOR_CONFIG.top_p = 1.0 if deterministic else GENERATOR_TOP_P
+    GENERATOR_CONFIG.top_k = None if deterministic else GENERATOR_TOP_K
+    GENERATOR_CONFIG.repetition_penalty = 1.0 if deterministic else GENERATOR_REPETITION_PENALTY
     GENERATOR_CONFIG.do_sample = not deterministic
 
     for config in DISCRIMINATOR_CONFIGS:
         if config.model_type == ModelType.HUGGINGFACE:
             config.temperature = 0.0 if deterministic else DISCRIMINATOR_TEMPERATURE
-            config.top_p = 1.0 if deterministic else TOP_P
+            config.top_p = 1.0 if deterministic else DISCRIMINATOR_TOP_P
+            config.top_k = None
+            config.repetition_penalty = 1.0
             config.do_sample = not deterministic
         else:
             config.temperature = DISCRIMINATOR_TEMPERATURE
-            config.top_p = TOP_P
+            config.top_p = DISCRIMINATOR_TOP_P
+            config.top_k = None
+            config.repetition_penalty = 1.0
             config.do_sample = True
 
 
@@ -345,8 +358,16 @@ class LLMWrapper:
                 model_kwargs={"torch_dtype": self.config.torch_dtype},
                 device_map="auto"
             )
+            if self.pipe.tokenizer.pad_token_id is None and self.pipe.tokenizer.eos_token_id is not None:
+                self.pipe.tokenizer.pad_token = self.pipe.tokenizer.eos_token
+
             default_generation_config = GenerationConfig.from_model_config(self.pipe.model.config)
             default_generation_config.max_length = None
+            default_generation_config.pad_token_id = (
+                self.pipe.tokenizer.pad_token_id
+                if self.pipe.tokenizer.pad_token_id is not None
+                else self.pipe.tokenizer.eos_token_id
+            )
             self.pipe.model.generation_config = default_generation_config
             self.pipe.generation_config = default_generation_config
             if "llama" in self.config.model_id.lower():
@@ -511,13 +532,22 @@ class LLMWrapper:
             generation_config.max_new_tokens = max_new_tokens
             generation_config.max_length = None
             generation_config.eos_token_id = self.terminators
+            generation_config.pad_token_id = (
+                self.pipe.tokenizer.pad_token_id
+                if self.pipe.tokenizer.pad_token_id is not None
+                else self.pipe.tokenizer.eos_token_id
+            )
             generation_config.do_sample = self.config.do_sample
             if self.config.do_sample:
                 generation_config.temperature = self.config.temperature
                 generation_config.top_p = self.config.top_p
+                generation_config.top_k = self.config.top_k
             else:
                 generation_config.temperature = None
                 generation_config.top_p = None
+                generation_config.top_k = None
+
+            generation_config.repetition_penalty = self.config.repetition_penalty
 
             prompt_input = messages
             if self._should_disable_thinking() and isinstance(messages, list):
@@ -618,15 +648,30 @@ class TextGradOptimizer(tg.EngineLM):
 
         return failed_attempt
 
-    def create_loss(self, question: str) -> tg.TextLoss:
+    def create_loss(
+        self,
+        question: str,
+        knowledge: str,
+        discriminator_reasoning: Optional[str] = None,
+    ) -> tg.TextLoss:
         """Create a TextGrad loss function for hallucination evaluation."""
+        discriminator_feedback = ""
+        if discriminator_reasoning:
+            discriminator_feedback = (
+                "\n        Discriminator feedback to address:\n"
+                f"        {discriminator_reasoning}\n"
+            )
+
         evaluation_instruction = tg.Variable(
             f"""Evaluate the given hallucinated answer for this question: {question}
+        Knowledge context: {knowledge}
+        {discriminator_feedback}
         Consider:
         1. Plausibility given the context, is it on-topic and relevant?
         2. Internal consistency, does the answer make sense and is it logically coherent?
         3. Use of domain-specific terminology
         4. How easy is it for the discriminator to detect the answer as a hallucination?
+        5. If discriminator feedback is provided, address those objections directly.
         
         Provide specific feedback on how to improve the answer to make it more convincing.
         Be concise and direct.""",
@@ -641,6 +686,7 @@ class TextGradOptimizer(tg.EngineLM):
         failed_text: str,
         question: str,
         knowledge: str,
+        discriminator_reasoning: Optional[str] = None,
     ) -> str:
         """Improve a failed hallucination attempt with TextGrad."""
         try:
@@ -651,7 +697,11 @@ class TextGradOptimizer(tg.EngineLM):
             )
 
             optimizer = tg.TGD(parameters=[failed_attempt])
-            loss_fn = self.create_loss(question)
+            loss_fn = self.create_loss(
+                question,
+                knowledge,
+                discriminator_reasoning,
+            )
 
             for _ in range(3):
                 loss = loss_fn(failed_attempt)
@@ -681,25 +731,44 @@ def calculate_semantic_similarity(text1: str, text2: str, model: SentenceTransfo
         print(f"Error in semantic similarity calculation: {e}")
         return 0.0
 
-# option1: GT answer, option2: hallucinated answer + justification.
-# Check if the LLM discriminator prefers the hallucinated answer or the ground truth answer, 
-# given the question and knowledge context.
-def create_prompt(question: str, option1: str, option2: str, justification: str) -> str:
-    """Create a prompt for the discriminator model."""
-    prompt = f"""
-    Question: {question}
-    Option 1: {option1}
-    Option 2: {option2} + {justification}
-    
-    Return just the answer, for example: "Option 1" or "Option 2". Don't return anything else, just the answer.
-    """
+
+def build_generation_context(question: str, knowledge: str, ground_truth: str) -> str:
+    """Build the structured context block shared by generator and judge."""
+    return (
+        f"#Question#: {question}\n\n"
+        f"#Knowledge#: {knowledge}\n\n"
+        f"#Ground truth answer#: {ground_truth}"
+    )
+
+
+def build_generation_prompt(
+    question: str,
+    knowledge: str,
+    ground_truth: str,
+    previous_attempt: Optional[str] = None,
+) -> str:
+    """Build an explicit formatting prompt for the generator."""
+    context_block = build_generation_context(question, knowledge, ground_truth)
+    prompt = (
+        f"{context_block}\n\n"
+        "Return exactly these two fields and nothing else:\n"
+        "#Hallucinated Answer#: <single concise medically plausible but incorrect answer>\n"
+        "#Justification of Hallucinated answer#: <brief rationale supporting that answer>"
+    )
+
+    if previous_attempt:
+        prompt += f"\n\nRevise this previous attempt to make it more plausible while preserving the exact output format:\n{previous_attempt}"
+
     return prompt
 
 def get_sections(text: str) -> Tuple[str, str, str, str, str]:
     """Extract different sections from the generated text."""
     try:
-        pattern = r'#([^#]+)#:\s*([^#]+)'
-        matches = re.findall(pattern, text)
+        pattern = re.compile(
+            r'#([^#]+)#:\s*(.*?)(?=\n\s*#[^#]+#:\s*|\Z)',
+            re.DOTALL,
+        )
+        matches = pattern.findall(text)
         sections = {}
         for label, content in matches:
             sections[label.strip()] = content.strip()
@@ -713,9 +782,9 @@ def get_sections(text: str) -> Tuple[str, str, str, str, str]:
         print(f"Error parsing sections: {e}")
         return '', '', '', '', ''
 
-def determine_difficulty(discriminator_results: List[bool]) -> DifficultyLevel:
+def determine_difficulty(discriminator_results: List[Dict[str, Any]]) -> DifficultyLevel:
     """Determine the difficulty level based on which discriminators were fooled."""
-    num_fooled = sum(discriminator_results)
+    num_fooled = sum(result["fooled"] for result in discriminator_results)
     
     if num_fooled == len(discriminator_results):
         return DifficultyLevel.HARD
@@ -723,6 +792,96 @@ def determine_difficulty(discriminator_results: List[bool]) -> DifficultyLevel:
         return DifficultyLevel.MEDIUM
     else:
         return DifficultyLevel.EASY
+
+
+class LLMJudge:
+    """Wrap discriminator models and prompt formatting for hallucination judging."""
+
+    def __init__(self, discriminator_wrappers: List[LLMWrapper], system_prompt: str):
+        self.discriminator_wrappers = discriminator_wrappers
+        self.system_prompt = system_prompt
+
+    def create_prompt(
+        self,
+        question: str,
+        option1: str,
+        option2: str,
+        justification: str,
+    ) -> str:
+        """Create a prompt for the discriminator model."""
+        return f"""
+    Question: {question}
+    Option 1: {option1}
+    Option 2: {option2} + {justification}
+
+    Return the answer, for example: "Option 1" or "Option 2", as well as the reasoning behind the choice.
+    """
+
+    def _create_messages(self, wrapper: LLMWrapper, prompt: str) -> List[Dict[str, str]]:
+        if wrapper.config.model_type == ModelType.OPENAI:
+            return [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+
+        return [{"role": "user", "content": f"{self.system_prompt}\n\nUser: {prompt}"}]
+
+    @staticmethod
+    def _extract_selected_option(pred_answer: str) -> Optional[str]:
+        if not pred_answer:
+            return None
+
+        match = re.search(r"option\s*([12])\b", pred_answer, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+        match = re.search(r"\b([12])\b", pred_answer)
+        if match:
+            return match.group(1)
+
+        return None
+
+    def evaluate(self, answer: str) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+        """Check whether the answer fools any configured discriminator."""
+        print("\nChecking hallucination against multiple discriminators...")
+        try:
+            question, _, ground_truth_answer, hallucinated_answer, justification = get_sections(answer)
+
+            if not all([hallucinated_answer, justification]):
+                print("Missing required sections in generated text")
+                return [
+                    {"fooled": False, "reasoning": None}
+                    for _ in self.discriminator_wrappers
+                ], None, None
+
+            prompt = self.create_prompt(
+                question,
+                ground_truth_answer,
+                hallucinated_answer,
+                justification,
+            )
+
+            results = []
+            for index, wrapper in enumerate(self.discriminator_wrappers, start=1):
+                try:
+                    pred_answer = wrapper.generate(self._create_messages(wrapper, prompt))
+                    print(f"Discriminator {index} answer: {pred_answer}")
+                    selected_option = self._extract_selected_option(pred_answer)
+                    results.append({
+                        "fooled": selected_option == "2",
+                        "reasoning": pred_answer.strip() if pred_answer else None,
+                    })
+                except Exception as e:
+                    print(f"Error with discriminator {index}: {e}")
+                    results.append({"fooled": False, "reasoning": None})
+
+            return results, hallucinated_answer, justification
+        except Exception as e:
+            print(f"Error in judge evaluation: {e}")
+            return [
+                {"fooled": False, "reasoning": None}
+                for _ in self.discriminator_wrappers
+            ], None, None
 
 def create_empty_results_df(
     num_generations: int,
@@ -738,6 +897,7 @@ def create_empty_results_df(
         ])
         for j, config in enumerate(discriminator_configs):
             columns.append(f'fooled_discriminator_{j+1}_{i+1}')
+            columns.append(f'discriminator_reasoning_{j+1}_{i+1}')
         columns.append(f'difficulty_level_{i+1}')
     
     columns.append('least_similar_answer')
@@ -760,7 +920,11 @@ def save_checkpoint(df: pd.DataFrame, checkpoint_path: str):
         print(f"Error saving checkpoint: {e}")
         
 # ============ Model Initialization ============
-def initialize_models(openai_api_key: str = "", hf_model_id: str = GENERATOR_MODEL_ID):
+def initialize_models(
+    openai_api_key: str = "",
+    hf_model_id: str = GENERATOR_MODEL_ID,
+    detection_system_prompt: str = "",
+):
     """Initialize all required models."""
     try:
         cleaned_api_key = openai_api_key.strip() if openai_api_key else ""
@@ -795,65 +959,24 @@ def initialize_models(openai_api_key: str = "", hf_model_id: str = GENERATOR_MOD
             else:
                 wrapper = LLMWrapper(config)
             discriminator_wrappers.append(wrapper)
+
+        judge = LLMJudge(discriminator_wrappers, system_prompt=detection_system_prompt)
         
-        return generator_wrapper, discriminator_wrappers, sent_model
+        return generator_wrapper, judge, sent_model
     
     except Exception as e:
         print(f"Error initializing models: {e}")
         raise
-    
-def check_hallu_multiple(
-    answer: str, 
-    discriminator_wrappers: List[LLMWrapper],
-    detection_system_prompt: str,
-) -> Tuple[List[bool], Optional[str], Optional[str]]:
-    """Check if the hallucinated answer can fool multiple discriminators."""
-    print("\nChecking hallucination against multiple discriminators...")
-    try:
-        question, knowledge, ground_truth_answer, hallucinated_answer, justification = get_sections(answer)
-        
-        if not all([hallucinated_answer, justification]):
-            print("Missing required sections in generated text")
-            return [False] * len(discriminator_wrappers), None, None
-        
-        option1 = ground_truth_answer
-        option2 = hallucinated_answer
-        prompt = create_prompt(question, option1, option2, justification)
-        
-        results = []
-        for i, wrapper in enumerate(discriminator_wrappers):
-            try:
-                if wrapper.config.model_type == ModelType.OPENAI:
-                    messages = [
-                        {"role": "system", "content": detection_system_prompt},
-                        {"role": "user", "content": prompt}
-                    ]
-                else:
-                    messages = [{"role": "user", "content": f"{detection_system_prompt}\n\nUser: {prompt}"}]
-                
-                pred_answer = wrapper.generate(messages)
-                print(f"Discriminator {i+1} answer: {pred_answer}")
-                
-                results.append("2" in pred_answer.lower())
-            except Exception as e:
-                print(f"Error with discriminator {i+1}: {e}")
-                results.append(False)
-        
-        return results, hallucinated_answer, justification
-    except Exception as e:
-        print(f"Error in check_hallu_multiple: {e}")
-        return [False] * len(discriminator_wrappers), None, None
 
 def generate_hallucinations(
     question: str, 
     knowledge: str, 
     ground_truth: str, 
     generator_wrapper: LLMWrapper,
-    discriminator_wrappers: List[LLMWrapper],
+    judge: LLMJudge,
     sent_model: SentenceTransformer,
     num_generations: int,
     system_prompt: str,
-    detection_system_prompt: str,
     textgrad_optimizer: TextGradOptimizer,
 ) -> Tuple[List[Dict], Optional[str], DifficultyLevel]:
     """Generate and evaluate hallucinations with TextGrad-based improvement."""
@@ -867,8 +990,8 @@ def generate_hallucinations(
             print(f"\nAttempt {attempts_on_current_datapoint + 1}/{num_generations} for current datapoint")
             
             # 1. Fresh generation for each attempt
-            # knowledge: 'context' in the row.
-            prompt = f"#Question#: {question}\n\n#Knowledge#: {knowledge}\n\n#Ground truth answer#: {ground_truth}\n\n#Hallucinated Answer#:"
+            context_block = build_generation_context(question, knowledge, ground_truth)
+            prompt = build_generation_prompt(question, knowledge, ground_truth)
             
             if generator_wrapper.config.model_type == ModelType.OPENAI:
                 messages = [{"role": "system", "content": current_system_prompt},
@@ -885,19 +1008,15 @@ def generate_hallucinations(
             
             current_text = generated_text
             if generator_wrapper.config.model_type == ModelType.HUGGINGFACE:
-                long_answer = f"{prompt} {current_text}"
+                long_answer = f"{context_block}\n\n{current_text}"
             else:
                 long_answer = current_text
             
             # 2. Check this generation
-            discriminator_results, hallucinated_answer, justification = check_hallu_multiple(
-                long_answer,
-                discriminator_wrappers,
-                detection_system_prompt,
-            )
+            discriminator_results, hallucinated_answer, justification = judge.evaluate(long_answer)
             
             # If any discriminator is fooled, record and break immediately
-            if any(discriminator_results):
+            if any(result['fooled'] for result in discriminator_results):
                 difficulty = determine_difficulty(discriminator_results)
                 current_hallucination = {
                     'answer': hallucinated_answer if hallucinated_answer else current_text,
@@ -914,33 +1033,41 @@ def generate_hallucinations(
             # 3. If no discriminator was fooled, try TextGrad improvement
             print(f"Attempt failed. Using TextGrad to improve...")
             try:
+                discriminator_reasoning = "Reasons: ".join(
+                    f"{result['reasoning']}"
+                    for idx, result in enumerate(discriminator_results)
+                    if result['reasoning']
+                )
                 improved_text = textgrad_optimizer.improve_hallucination(
                     long_answer,
                     question,
                     knowledge,
+                    discriminator_reasoning
                 )
                 
                 # Generate based on TextGrad's improvements
+                improved_prompt = build_generation_prompt(
+                    question,
+                    knowledge,
+                    ground_truth,
+                    previous_attempt=improved_text,
+                )
                 if generator_wrapper.config.model_type == ModelType.OPENAI:
                     messages = [
                         {"role": "system", "content": current_system_prompt},
-                        {"role": "user", "content": f"{prompt}\n\nPrevious attempt improved by TextGrad: {improved_text}"}
+                        {"role": "user", "content": improved_prompt}
                     ]
                 else:
-                    messages = [{"role": "user", "content": f"{current_system_prompt}\n\n{prompt}\n\nPrevious attempt improved by TextGrad: {improved_text}"}]
+                    messages = [{"role": "user", "content": f"{current_system_prompt}\n\n{improved_prompt}"}]
                 
                 improved_generated = generator_wrapper.generate(messages, max_new_tokens=MAX_NEW_TOKENS)
-                improved_long_answer = improved_generated if generator_wrapper.config.model_type == ModelType.OPENAI else f"{prompt} {improved_generated}"
+                improved_long_answer = improved_generated if generator_wrapper.config.model_type == ModelType.OPENAI else f"{context_block}\n\n{improved_generated}"
                 
                 # Check the improved generation
-                discriminator_results, hallucinated_answer, justification = check_hallu_multiple(
-                    improved_long_answer,
-                    discriminator_wrappers,
-                    detection_system_prompt,
-                )
+                discriminator_results, hallucinated_answer, justification = judge.evaluate(improved_long_answer)
                 
                 # If TextGrad improvement fooled any discriminator, record and break
-                if any(discriminator_results):
+                if any(result['fooled'] for result in discriminator_results):
                     difficulty = determine_difficulty(discriminator_results)
                     current_hallucination = {
                         'answer': hallucinated_answer if hallucinated_answer else improved_generated,
@@ -977,7 +1104,7 @@ def generate_hallucinations(
             continue
     
     # If we never fooled any discriminator, find least similar answer
-    if not any(any(h['discriminator_results']) for h in hallucinations):
+    if not any(any(result['fooled'] for result in h['discriminator_results']) for h in hallucinations):
         try:
             similarities = [calculate_semantic_similarity(h['answer'], ground_truth, sent_model) 
                           for h in hallucinations if h['answer']]
@@ -991,7 +1118,10 @@ def generate_hallucinations(
             final_answer = None
     else:
         # Use the first successful hallucination
-        successful = next(h for h in hallucinations if any(h['discriminator_results']))
+        successful = next(
+            h for h in hallucinations
+            if any(result['fooled'] for result in h['discriminator_results'])
+        )
         final_answer = successful['answer']
     
     return hallucinations, final_answer, best_difficulty
@@ -1024,8 +1154,9 @@ def main():
         )
 
     print("Initializing models...")
-    generator_wrapper, discriminator_wrappers, sent_model = initialize_models(
+    generator_wrapper, judge, sent_model = initialize_models(
         openai_api_key=args.openai_key,
+        detection_system_prompt=detection_system_prompt,
     )
     textgrad_optimizer = TextGradOptimizer(openai_api_key=args.openai_key)
     
@@ -1045,11 +1176,10 @@ def main():
             hallucinations, least_similar_answer, final_difficulty = generate_hallucinations(
                 question, knowledge, ground_truth, 
                 generator_wrapper,
-                discriminator_wrappers,
+                judge,
                 sent_model,
                 num_generations,
                 system_prompt,
-                detection_system_prompt,
                 textgrad_optimizer,
             )
             
@@ -1066,13 +1196,15 @@ def main():
                     row_data[f'hallucinated_answer_{j+1}'] = hall['answer']
                     row_data[f'justification_{j+1}'] = hall['justification']
                     for k, result in enumerate(hall['discriminator_results']):
-                        row_data[f'fooled_discriminator_{k+1}_{j+1}'] = result
+                        row_data[f'fooled_discriminator_{k+1}_{j+1}'] = result['fooled']
+                        row_data[f'discriminator_reasoning_{k+1}_{j+1}'] = result['reasoning']
                     row_data[f'difficulty_level_{j+1}'] = hall['difficulty'].value
                 else:
                     row_data[f'hallucinated_answer_{j+1}'] = None
                     row_data[f'justification_{j+1}'] = None
-                    for k in range(len(discriminator_wrappers)):
+                    for k in range(len(judge.discriminator_wrappers)):
                         row_data[f'fooled_discriminator_{k+1}_{j+1}'] = False
+                        row_data[f'discriminator_reasoning_{k+1}_{j+1}'] = None
                     row_data[f'difficulty_level_{j+1}'] = DifficultyLevel.EASY.value
 
             results_df = pd.concat([results_df, pd.DataFrame([row_data])], ignore_index=True)
