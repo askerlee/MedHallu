@@ -19,6 +19,8 @@ ds = load_dataset("UTAustin-AIHealth/MedHallu", "pqa_labeled")
 ## Files
 
 - `detection_vllm_notsurecase.py` - Script for evaluating LLMs with a "not sure" option
+- `detect_llm_advcase.py` - Existing hallucination-focused adversarial evaluation script
+- `detect_llm_guideline_cases.py` - Evaluates whether LLMs can distinguish guideline-concordant source cases from guideline-violating near-miss cases
 - `bidirectional_checking.py` - Utility for comparing semantic similarity between answers
 - `Mesh.py` - Tool for analyzing MeSH (Medical Subject Headings) categories
 
@@ -82,6 +84,19 @@ This will:
 2. Evaluate each model with and without domain knowledge
 3. Calculate performance metrics (precision, recall, F1 score)
 4. Save results to the specified CSV file
+
+To evaluate guideline-concordant source cases against adversarial near-miss cases:
+
+```bash
+python detect_llm_guideline_cases.py \
+    --adversarial-path ../guideline_policy/sample_vignette_adv.json \
+    --predictions-csv ../guideline_policy/guideline_case_predictions.csv \
+    --results-csv ../guideline_policy/guideline_case_results.csv
+```
+
+By default, this script reads both the concordant `source_case` entries and the discordant `challenging_examples` entries from the adversarial file. Use `--groundtruth-path` only if you want to override the concordant cases with a separate source vignette file.
+
+This script uses the structured guideline rules as the reference standard, judges each vignette together with its proposed actions, and reports both per-example predictions and summary metrics for the three configured LLMs.
 
 ### Bidirectional Checking
 
