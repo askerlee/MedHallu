@@ -524,6 +524,13 @@ def main() -> None:
             "Missing dependency 'datasets'. Install it with: pip install datasets"
         ) from exc
 
+    try:
+        from tqdm import tqdm
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing dependency 'tqdm'. Install it with: pip install tqdm"
+        ) from exc
+
     preferred_fields = [f.strip() for f in args.text_fields.split(",") if f.strip()]
 
     llm_client: Optional[Any] = None
@@ -551,7 +558,7 @@ def main() -> None:
 
     enriched_rows: List[Dict[str, Any]] = []
     method_counts: Dict[str, int] = {"llm": 0, "regex": 0, "regex_fallback": 0}
-    for i in range(n):
+    for i in tqdm(range(n), total=n, desc="Converting records"):
         record = dict(dataset[i])
         guideline_text = extract_text_from_record(record, preferred_fields)
         rule_spec = build_rule_spec_from_text(

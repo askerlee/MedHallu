@@ -1,0 +1,844 @@
+[
+  {
+    "guideline": {
+      "record_index": 0,
+      "id": "7a73f9287841533eeb11c025026322a23d519f2c",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "PREOP_STAGING",
+        "priority": 80,
+        "activation_condition": "Clinically N-0 neck",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not rely on PET as better than conventional imaging for nodal staging",
+        "source_statement": "In the clinically N-0 neck, PET does not appear to be better than conventional imaging, because of an unacceptably high false-negative rate."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "TREATMENT_RESPONSE",
+        "priority": 80,
+        "activation_condition": "Assessing recurrence or surveillance after treatment at clinically accessible disease sites",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not use PET routinely for clinically accessible sites",
+        "source_statement": "With respect to recurrence and tumour surveillance after treatment, the evidence suggests that sites of disease that are clinically accessible for assessment did not benefit from PET imaging."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "PREOP_STAGING",
+        "priority": 70,
+        "activation_condition": "Head and neck squamous cell carcinoma with equivocal conventional imaging or treatment may be significantly modified",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use PET for M and bilateral nodal staging",
+        "source_statement": "PET is recommended in the M and bilateral nodal staging of all patients with head and neck squamous cell carcinoma where conventional imaging is equivocal, or where treatment may be significantly modified."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "Primary site is unknown after conventional imaging",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use PET after conventional imaging and before or in addition to diagnostic panendoscopy",
+        "source_statement": "PET is recommended in all patients after conventional imaging and in addition to, or prior to, diagnostic panendoscopy where the primary site is unknown."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "Cervical lymph node metastases with unknown primary site after conventional imaging or clinical examination",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use PET/CT prior to panendoscopy",
+        "source_statement": "patients with cervical metastasis and an unknown primary site after undergoing conventional imaging or clinical examination benefit from PET/CT prior to panendoscopy"
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "PREOP_STAGING",
+        "priority": 70,
+        "activation_condition": "Need staging of distant metastatic disease, especially in high-risk patients",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use PET to detect distant metastatic disease",
+        "source_statement": "There is strong evidence that PET imaging is valuable in detecting distant metastatic disease and is better than conventional imaging."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "PREOP_STAGING",
+        "priority": 70,
+        "activation_condition": "Locally advanced disease or nasopharyngeal carcinoma with high risk for distant disease",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Prefer PET for distant disease staging",
+        "source_statement": "The advantage of PET is overwhelming for patients at high risk for distant disease, which includes locally advanced disease and nasopharyngeal carcinoma."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "Nasopharyngeal carcinoma with equivocal conventional imaging",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use PET for staging and assessment of recurrence",
+        "source_statement": "PET is recommended for staging and assessment of recurrence of patients with nasopharyngeal carcinoma if conventional imaging is equivocal."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 58-year-old man with newly diagnosed stage IVA squamous cell carcinoma of the oropharynx presents for preoperative staging. Contrast-enhanced CT of the neck shows a clearly negative cervical nodal exam, with no suspicious lymph nodes identified, and the primary tumor appears localized without evidence of distant spread. He has no neurologic or pulmonary symptoms, and his physical exam is otherwise unremarkable. The oncology team is considering whether PET should be added to better assess the neck before surgery. Because the neck is clinically N0 and conventional imaging is not equivocal, there is concern that PET may not add meaningful value for nodal staging.",
+      "triggered_rule_ids": [
+        "R001"
+      ],
+      "recommended_actions": [
+        "Do not rely on PET as better than conventional imaging for nodal staging in this clinically N0 neck."
+      ],
+      "rationale": "Rule R001 is triggered because the patient has a clinically N0 neck during preoperative staging. The rule states PET does not appear to be better than conventional imaging for nodal staging in this setting due to an unacceptably high false-negative rate."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 1,
+      "id": "0ca6b1adf1e6c001dc70cd13be35a1e8a4c14839",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "GENERAL",
+        "priority": 80,
+        "activation_condition": "considering multiple multigene profiling tests on one tumour specimen for a single treatment decision",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not request multiple multigene profiling assays on the same tumour specimen for one decision.",
+        "source_statement": "Requesting multiple tests with different multigene profiling assays on an individual tumour specimen to guide a single treatment decision is discouraged."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "lymph node-negative or 1-3 node-positive disease and considering adjuvant chemotherapy with supportive clinical, pathological, or patient-related factors",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use a multigene profiling assay to help decide on adjuvant chemotherapy.",
+        "source_statement": "Multigene profiling assays are recommended for use in patients with lymph node-negative or lymph node-positive (1-3 lymph nodes) disease who are under consideration for adjuvant chemotherapy if the use is supported by other clinical, pathological, or patient-related factors."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "choosing a multigene profiling assay for a single treatment decision",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Request only one multigene profiling assay per patient.",
+        "source_statement": "One multigene profiling assay should be requested per patient to guide a specific treatment decision."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "early-stage ER-positive, HER2-negative breast cancer needing systemic therapy guidance",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "Consider using a multigene profiling assay to help guide systemic therapy.",
+        "source_statement": "In patients with early-stage estrogen receptor (ER)-positive/human epidermal growth factor 2 (HER2)-negative breast cancer, clinicians should consider using multigene profiling assays ... to help guide the use of systemic therapy."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "repeat metachronous breast cancer diagnosis or synchronous breast cancers with differing morphology, grade, or hormone receptor status",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "Consider additional multigene profiling testing.",
+        "source_statement": "Additional testing may be considered for patients with either repeat metachronous breast cancer diagnoses or synchronous breast cancer diagnoses where tumour specimens display varying morphologies, grade or hormone receptor status."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "premenopausal patient with a low-risk multigene profiling score",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "Interpret the assay cautiously because meaningful benefit from adjuvant chemotherapy may still exist.",
+        "source_statement": "Multigene profiling assays should be interpreted cautiously in premenopausal patients where a significant benefit from adjuvant chemotherapy may still exist despite a low-risk score."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "ER-positive disease and considering extension of adjuvant endocrine therapy",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "Consider using a Breast Cancer Index (BCI) H/I high result to support extending adjuvant endocrine therapy if other clinical, pathological, or patient-related factors support it.",
+        "source_statement": "In patients with ER-positive disease, clinicians may consider using a Breast Cancer Index (BCI) (H/I) high assay result to support a decision to extend adjuvant endocrine therapy if the decision is supported by other clinical, pathological, or patientrelated factors."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "making endocrine therapy duration decisions",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "Base the decision on all available clinical and pathological information, not only multigene profiling tests.",
+        "source_statement": "Treatment decisions should be based on all available clinical and pathological information for each patient, rather than depending only on multigene profiling tests."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 52-year-old premenopausal woman is seen after lumpectomy for a 1.8 cm invasive ductal carcinoma that is ER-positive and HER2-negative. Sentinel node biopsy shows 0/3 nodes involved, and the tumor has intermediate grade with no lymphovascular invasion. Her oncologist is considering adjuvant chemotherapy because of the tumor size and the patient’s preference to avoid undertreatment. The team discusses genomic testing to help guide the decision. She asks whether two different commercial multigene assays should be sent from the same tumor block to be extra certain.",
+      "triggered_rule_ids": [
+        "R002",
+        "R003",
+        "R004",
+        "R006"
+      ],
+      "recommended_actions": [
+        "Use a multigene profiling assay to help decide on adjuvant chemotherapy.",
+        "Request only one multigene profiling assay per patient.",
+        "Consider using a multigene profiling assay to help guide systemic therapy.",
+        "Interpret the assay cautiously because meaningful benefit from adjuvant chemotherapy may still exist in a premenopausal patient even with a low-risk score."
+      ],
+      "rationale": "This case fits early-stage ER-positive, HER2-negative breast cancer with node-negative disease in which adjuvant chemotherapy is being considered and supported by clinical factors, so multigene profiling is appropriate. Because the patient is premenopausal, a low-risk result should be interpreted cautiously. The scenario also involves choosing a profiling assay for one treatment decision, so only one assay should be ordered rather than multiple tests on the same specimen."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 2,
+      "id": "68984194848f42b555d2a3c9077ac7a1e53f976b",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "PREOP_STAGING",
+        "priority": 60,
+        "activation_condition": "Newly diagnosed biopsy-confirmed prostate cancer; intermediate- or high-risk; being considered for radical therapy; knowledge of extraprostatic extension would alter management",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "Consider multiparametric MRI for pre-treatment local staging to assess extraprostatic extension",
+        "source_statement": "Multiparametric MRI (mpMRI) use for pre-treatment local staging of prostate cancer is a reasonable option for assessment of extraprostatic extension (EPE) in intermediate-and highrisk patients being considered for radical therapy if knowledge of EPE will alter management."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 67-year-old man is referred after a prostate biopsy confirmed adenocarcinoma with a Gleason score of 4+3. His PSA is 12.8 ng/mL, and digital rectal exam suggests a firm nodule on the right side without obvious fixation. He is otherwise healthy and is being evaluated for radical prostatectomy versus radiation therapy with curative intent. His urologist notes that if there is extraprostatic extension, the surgical plan and counseling may change, including whether nerve-sparing surgery is appropriate. The patient has no metastatic symptoms and no prior prostate imaging beyond ultrasound-guided biopsy.",
+      "triggered_rule_ids": [
+        "R001"
+      ],
+      "recommended_actions": [
+        "Consider multiparametric MRI for pre-treatment local staging to assess for extraprostatic extension, because the patient has newly diagnosed biopsy-confirmed intermediate-risk prostate cancer and knowledge of extraprostatic extension could alter management."
+      ],
+      "rationale": "This vignette matches the pre-treatment staging scenario for intermediate-risk, biopsy-confirmed prostate cancer in a patient being considered for radical therapy. The key management question is whether extraprostatic extension is present, since that information would affect treatment planning."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 3,
+      "id": "c80ad0d5ba1eee75e1702847d361abd6ce4bc7b0",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "woman with cervical cancer and radiotherapy is being considered as primary treatment",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer concurrent cisplatin with the course of radiotherapy",
+        "source_statement": "Women with cervical cancer for whom treatment with radiotherapy is being considered (described above) should be offered concurrent cisplatin with their course of radiotherapy."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "locally advanced cervical cancer and radiotherapy is being considered",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer concurrent cisplatin with radiotherapy",
+        "source_statement": "These recommendations apply to women with cervical cancer for whom primary treatment with radiotherapy is being considered: -those with locally advanced cervical cancer... Women with cervical cancer for whom treatment with radiotherapy is being considered (described above) should be offered concurrent cisplatin with their course of radiotherapy."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "bulky clinical stage IB cervical cancer greater than 4 cm and radiotherapy is being used",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer concurrent cisplatin with radiotherapy",
+        "source_statement": "These recommendations apply to women with cervical cancer for whom primary treatment with radiotherapy is being considered: -those with bulky clinical stage IB (>4 cm) cervical cancer, who are treated with radiotherapy... Women with cervical cancer for whom treatment with radiotherapy is being considered (described above) should be offered concurrent cisplatin with their course of radiotherapy."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "high-risk early-stage cervical cancer that is node-positive or margin-positive and radiotherapy will follow hysterectomy",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer concurrent cisplatin with postoperative radiotherapy",
+        "source_statement": "These recommendations apply to women with cervical cancer for whom primary treatment with radiotherapy is being considered: -those with high-risk early-stage cervical cancer (node-positive or margin-positive), who will be treated with radiotherapy following hysterectomy. Women with cervical cancer for whom treatment with radiotherapy is being considered (described above) should be offered concurrent cisplatin with their course of radiotherapy."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "when using concurrent cisplatin with radiotherapy",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "use weekly cisplatin 40 mg/m2",
+        "source_statement": "Based on the review of the available toxicity data from the randomized controlled trials, the Disease Site Group felt that cisplatinum should be given weekly (40 mg/m2)."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "GENERAL",
+        "priority": 60,
+        "activation_condition": "patient is receiving cisplatin-based chemotherapy plus radiotherapy",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "recognize that serious hematologic, gastrointestinal, and genitourinary acute adverse effects are higher than with radiotherapy alone",
+        "source_statement": "Rates of serious hematologic, gastrointestinal and genitourinary acute adverse effects are higher with cisplatin-based chemotherapy plus radiotherapy than with radiotherapy alone."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 60,
+        "activation_condition": "locally advanced cervical cancer",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "consider concurrent cisplatin plus radiotherapy because pooled survival favored this approach",
+        "source_statement": "The pooled relative risk of death among the six trials that enrolled only women with locally advanced cervical cancer was 0.78 (95% confidence interval, 0.67 to 0.90) in favour of cisplatin-based chemotherapy and radiotherapy."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 60,
+        "activation_condition": "high-risk early-stage cervical cancer",
+        "recommendation_class": "CONDITIONAL_CONSIDER",
+        "execute": "consider concurrent cisplatin plus radiotherapy because pooled survival favored this approach",
+        "source_statement": "The pooled relative risk for the two trials in high-risk early-stage disease also demonstrated a significant benefit for the addition of cisplatin-based chemotherapy to radiotherapy (relative risk, 0.56; 95% confidence interval, 0.41 to 0.77)."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 52-year-old woman presents with stage IIB cervical squamous cell carcinoma after biopsy-confirmed parametrial involvement. Pelvic MRI shows no distant metastases, and the gynecologic oncology team is planning definitive external beam radiotherapy with brachytherapy as primary treatment. She has good renal function and an ECOG performance status of 1. Her team is discussing whether to add chemotherapy to the radiation course.",
+      "triggered_rule_ids": [
+        "R001",
+        "R002",
+        "R007"
+      ],
+      "recommended_actions": [
+        "Offer concurrent cisplatin with the course of radiotherapy.",
+        "Consider concurrent cisplatin plus radiotherapy because pooled survival favored this approach in locally advanced cervical cancer.",
+        "If using concurrent cisplatin with radiotherapy, consider weekly cisplatin 40 mg/m2."
+      ],
+      "rationale": "This is locally advanced cervical cancer in which primary treatment with radiotherapy is being considered, so concurrent cisplatin is recommended. The evidence summary also favors cisplatin-based chemoradiation for locally advanced disease. The rules support weekly cisplatin 40 mg/m2 as a reasonable schedule when cisplatin is given with radiotherapy."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 4,
+      "id": "7a09ab0610ecc9990db3362ca0b00a37a016acb4",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "adult patient with resected stage II colon cancer",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not routinely use adjuvant chemotherapy for all stage II patients.",
+        "source_statement": "The routine use of adjuvant chemotherapy for all patients with stage II colon cancer is not recommended."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "stage II patient without high-risk features and no adjuvant chemotherapy needed",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not perform MSI/dMMR testing for this decision.",
+        "source_statement": "In stage II (in the absence of high-risk features) where a patient does not require adjuvant chemotherapy, MSI/dMMR testing is not recommended as it will not influence that decision."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "stage II patient with MSI/dMMR receiving fluoropyrimidine monotherapy after surgery",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not use fluoropyrimidine monotherapy.",
+        "source_statement": "Adjuvant chemotherapy with a fluoropyrimidine monotherapy regimen following surgery in patients who have MSI/dMMR is not recommended."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "high-risk stage II patient receiving adjuvant therapy",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use a fluoropyrimidine.",
+        "source_statement": "When treated with adjuvant therapy, high-risk stage II patients should receive a fluoropyrimidine."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "high-risk stage II patient receiving 5-FU monotherapy",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use 6 months of 5-FU monotherapy.",
+        "source_statement": "The duration of 5-FU monotherapy was not addressed in IDEA, and should remain 6 months."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "stage II patient for whom adjuvant chemotherapy is being considered",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Perform MSI/dMMR testing.",
+        "source_statement": "MSI/dMMR testing should be performed for all stage II patients for whom adjuvant chemotherapy is being considered."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "adult patient with resected stage III colon cancer",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Offer oxaliplatin-containing adjuvant chemotherapy such as FOLFOX, FLOX, or XELOX.",
+        "source_statement": "These oxaliplatin-containing regimens have demonstrated superior overall survival when compared with 5-FU plus LV and are the recommended regimens."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "low-risk stage III colon cancer (T1-3 N1)",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Prefer 3 months of CAPOX over FOLFOX.",
+        "source_statement": "Low-risk stage III (T1-3 N1): 3 months of CAPOX is preferred over FOLFOX."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 67-year-old man underwent right hemicolectomy for a 3.8 cm moderately differentiated adenocarcinoma of the ascending colon. Pathology shows pT3N0 disease with 18 negative lymph nodes, clear margins, no lymphovascular invasion, no perineural invasion, and no bowel obstruction or perforation. He has recovered well and asks whether he should receive chemotherapy after surgery. His oncology visit is focused on discussing adjuvant treatment options for this resected stage II colon cancer, and there are no high-risk features identified on the surgical report.",
+      "triggered_rule_ids": [
+        "R001",
+        "R002"
+      ],
+      "recommended_actions": [
+        "Do not routinely use adjuvant chemotherapy for all stage II patients.",
+        "Do not perform MSI/dMMR testing for this decision because the patient has stage II disease without high-risk features and does not require adjuvant chemotherapy."
+      ],
+      "rationale": "This is a resected stage II colon cancer case without high-risk features, which triggers the recommendation against routine adjuvant chemotherapy for all stage II patients. Because adjuvant chemotherapy is not needed in this setting, MSI/dMMR testing is not recommended for this decision since it would not change management."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 5,
+      "id": "8dc99ba0e643ca9733145769790691870c07fb3b",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "GENERAL",
+        "priority": 50,
+        "activation_condition": "When using this guideline document",
+        "recommendation_class": "NO_RECOMMENDATION",
+        "execute": "No clinical recommendation can be extracted from the provided text.",
+        "source_statement": "Section headings and contact/copyright information only; no clinical recommendations are present."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 58-year-old man presents to primary care for a routine follow-up after a recent move and asks whether his prior oncology records need to be reviewed. He has no acute complaints, and his exam is unremarkable. The available guideline document he brings appears to contain only section headings and administrative contact/copyright information, without any patient-care instructions or treatment algorithms. Because there are no clinical recommendations in the source text, no guideline-based management decision can be drawn from it.",
+      "triggered_rule_ids": [
+        "R001"
+      ],
+      "recommended_actions": [
+        "No clinical recommendation can be extracted from the provided text."
+      ],
+      "rationale": "Rule R001 is triggered because the guideline document contains only section headings and contact/copyright information and does not provide clinical recommendations. Therefore, the only supported action is to state that no guideline-based recommendation can be extracted."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 6,
+      "id": "3fc88a47cdb08da328a10eddd380c8ffc6415303",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "Patient has erectile dysfunction as the only symptom",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not use erectile dysfunction alone as an indication for DRE and PSA testing for metastatic prostate cancer",
+        "source_statement": "The working group did not think it necessary for a man with erectile dysfunction to undergo a DRE and PSA test and therefore excluded it as a symptom of metastatic prostate cancer."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "Patient has unexplained hematuria",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not include hematuria in the prostate cancer care algorithm; arrange urologic assessment as appropriate",
+        "source_statement": "The working group also excluded unexplained hematuria as a symptom of metastatic prostate cancer... hematuria requires urologic assessment but is not part of a prostate cancer care algorithm."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "Patient has LUTS and urinary infection has not been excluded",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not perform PSA testing until urinary infection is excluded",
+        "source_statement": "The working group also endorsed the recommendations to exclude urinary infection before PSA testing."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "Patient has LUTS and has recently been treated for urinary infection or another condition",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Postpone PSA testing for at least one month after treatment",
+        "source_statement": "The working group also endorsed the recommendations to... postpone PSA testing for at least one month after treatment."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "Patient is a healthy man without signs or symptoms of prostate cancer",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not apply this guideline for screening or opportunistic PSA testing",
+        "source_statement": "This guideline does not provide recommendations for screening healthy patients or opportunistic PSA testing."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "Patient is in a screening program",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not manage under this guideline",
+        "source_statement": "Although this guideline excludes patients in a screening program... Opportunistic screening has been excluded because it is beyond the scope of this guideline."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "Patient has symptoms of metastatic prostate cancer and is age 40 or older",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Perform digital rectal examination (DRE) and PSA test",
+        "source_statement": "The NZGG 2009 guideline recommendation that patients with symptoms of metastatic prostate cancer should have a DRE and PSA was endorsed. An age threshold of 40 years was included at the suggestion of the Expert Panel."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "Patient has lower urinary tract symptoms (LUTS)",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Perform DRE",
+        "source_statement": "The working group chose to recommend a DRE for all men with LUTS."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 67-year-old man presents with 4 months of progressively worsening lower urinary tract symptoms, including weak stream, nocturia three times nightly, and hesitancy. He denies dysuria, fever, flank pain, hematuria, weight loss, bone pain, or erectile dysfunction. He has not recently been treated for a urinary infection and has no known history of prostate cancer. Vital signs are normal, and the remainder of the exam is unremarkable. He asks whether he needs a prostate exam because of the urinary symptoms.",
+      "triggered_rule_ids": [
+        "R008"
+      ],
+      "recommended_actions": [
+        "Perform a digital rectal examination (DRE)."
+      ],
+      "rationale": "This vignette triggers the LUTS rule. The guideline recommends DRE for all men with lower urinary tract symptoms. No other rule is triggered because there is no evidence of metastatic prostate cancer symptoms, urinary infection, hematuria, erectile dysfunction as the only symptom, or screening-program context."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 7,
+      "id": "5b1aedafa44e59813f737012f097d77bc96dd71b",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "newly diagnosed low-risk prostate cancer requiring or choosing active treatment and eligible for treatment",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer low-dose rate brachytherapy alone, external beam radiation therapy alone, or radical prostatectomy",
+        "source_statement": "For patients with low-risk prostate cancer who require or choose active treatment, LDR alone, EBRT alone, or RP should be offered to eligible patients."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "newly diagnosed intermediate-risk prostate cancer choosing EBRT with or without androgen-deprivation therapy and eligible for brachytherapy",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer brachytherapy boost using low-dose rate or high-dose rate brachytherapy",
+        "source_statement": "For patients with intermediate-risk prostate cancer choosing EBRT with or without androgen-deprivation therapy (ADT), brachytherapy boost (LDR or high-dose rate should be offered to eligible patients."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "newly diagnosed high-risk prostate cancer receiving EBRT and androgen-deprivation therapy and eligible for brachytherapy",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer brachytherapy boost using low-dose rate or high-dose rate brachytherapy",
+        "source_statement": "For patients with high-risk prostate cancer receiving EBRT and ADT, brachytherapy boost (LDR or HDR) should be offered to eligible patients."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "patient is receiving low-dose rate brachytherapy",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "use iodine-125 or palladium-103 as reasonable isotope options",
+        "source_statement": "125 I and 103 Pd are each reasonable isotope options for patients receiving LDR brachytherapy; no recommendation can be made for or against using 131 Cs or HDR monotherapy."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "patient with prostate cancer is being managed under this guideline",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "encourage participation in clinical trials testing novel or targeted approaches",
+        "source_statement": "Patients should be encouraged to participate in clinical trials to test novel or targeted approaches to this disease."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "patient is being counseled about management options",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "counsel about all management options in a balanced, objective manner, preferably from multiple disciplines",
+        "source_statement": "Patients should be counseled about all their management options (surgery, EBRT, active surveillance, as applicable) in a balanced, objective manner, preferably from multiple disciplines."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "brachytherapy is being performed",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "perform brachytherapy at a center following strict quality-assurance standards",
+        "source_statement": "Brachytherapy should be performed at a center following strict quality-assurance standards."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "patient has low-risk prostate cancer requiring or choosing active treatment",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "offer active treatment options including LDR alone, EBRT alone, or radical prostatectomy to eligible patients",
+        "source_statement": "For patients with low-risk prostate cancer who require or choose active treatment, LDR alone, EBRT alone, or RP should be offered to eligible patients."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 59-year-old man is newly diagnosed with prostate adenocarcinoma after biopsy for an elevated PSA. His disease is low-risk: Gleason 3+3, PSA 5.8 ng/mL, and cT1c on exam, with no imaging evidence of spread. After discussing options, he says he does not want active surveillance and prefers definitive treatment. He is otherwise healthy and eligible for surgery or radiation. In clinic, he asks about the main treatment choices and whether any clinical trials are available. The team reviews his options in a multidisciplinary setting and explains that low-dose rate brachytherapy, external beam radiation therapy, or radical prostatectomy are all reasonable active-treatment approaches for his risk group.",
+      "triggered_rule_ids": [
+        "R001",
+        "R005",
+        "R006",
+        "R008"
+      ],
+      "recommended_actions": [
+        "Offer low-dose rate brachytherapy alone, external beam radiation therapy alone, or radical prostatectomy as active treatment options.",
+        "Encourage participation in clinical trials testing novel or targeted approaches.",
+        "Counsel him about all management options in a balanced, objective manner, preferably from multiple disciplines.",
+        "Offer active treatment options including LDR alone, EBRT alone, or radical prostatectomy to eligible patients."
+      ],
+      "rationale": "The vignette describes newly diagnosed low-risk prostate cancer in a patient who requires or chooses active treatment and is eligible for definitive therapy, which triggers the low-risk treatment recommendations. It also supports the general recommendations to discuss options objectively and encourage clinical trial participation."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 8,
+      "id": "2f0b7d32a0fed28287602ada73d594179dd16882",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "considering Doppler technology alone for adnexal mass evaluation",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not use Doppler technology alone; combine Doppler with morphological assessment.",
+        "source_statement": "Evaluation of an adnexal mass by Doppler technology alone is not recommended. Doppler technology should be combined with a morphological assessment."
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 80,
+        "activation_condition": "considering a stand-alone serum CA-125 test to distinguish benign from malignant adnexal masses",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not use serum CA-125 alone for distinguishing benign from malignant adnexal masses.",
+        "source_statement": "As a stand-alone modality, serum CA-125 is not recommended for distinguishing between benign and malignant adnexal masses."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "adult woman has a suspicious isolated ovarian mass and transvaginal sonography is technically feasible",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use transvaginal sonography as the first imaging modality of choice.",
+        "source_statement": "Transvaginal sonography should be the first modality of choice, where technically feasible, in patients with a suspicious, isolated ovarian mass."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "need to differentiate malignant from benign ovarian masses",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use sonography, particularly 3D sonography, MRI, or CT imaging for differentiation.",
+        "source_statement": "Sonography, particularly three-dimensional (3D) sonography, magnetic resonance imaging (MRI), and computerized tomography (CT) imaging are each recommended for differentiating malignant from benign ovarian masses."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "using morphological scoring systems to differentiate benign from malignant adnexal masses",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use morphological scoring systems; choose among them based on demonstrated accuracy and clinician preference.",
+        "source_statement": "Morphological scoring systems can be used to differentiate benign from malignant adnexal masses. The choice between the scoring systems should be made based on demonstrated accuracy and clinician preference."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "intraoperative diagnosis of a suspicious adnexal mass is needed and frozen section is available and acceptable to the patient",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use frozen section for intraoperative diagnosis.",
+        "source_statement": "Frozen section for the intraoperative diagnosis of a suspicious adnexal mass is recommended in settings where availability and patient preferences allow."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "considering combined morphology and Doppler ultrasound assessment",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use combined morphology and Doppler assessment as a high-performing diagnostic approach.",
+        "source_statement": "Summary estimates from studies considering combined morphology and Doppler assessment were higher than the estimates for either modality alone. Both sensitivity and specificity of this combined approach were high."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "INITIAL_DIAGNOSIS",
+        "priority": 70,
+        "activation_condition": "considering frozen section for adnexal mass assessment",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Use frozen section because it has high sensitivity and especially high specificity.",
+        "source_statement": "Finally, frozen-section analysis has both a high sensitivity and an especially high specificity in the assessment of adnexal masses."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 56-year-old postmenopausal woman presents with 3 weeks of intermittent bloating and early satiety. Pelvic exam suggests a right adnexal fullness, and transvaginal sonography is technically feasible. Ultrasound shows a 6.2 cm isolated ovarian mass with mixed solid-cystic components and papillary projections. The clinician initially asks whether Doppler flow alone or a serum CA-125 level would be enough to decide if the mass is malignant. Because the lesion is suspicious, further characterization is planned with careful morphologic assessment, and the team also considers a combined morphology-plus-Doppler approach to improve diagnostic accuracy. The patient is anxious about next steps and wants the most informative noninvasive evaluation before any surgical decision.",
+      "triggered_rule_ids": [
+        "R001",
+        "R003",
+        "R007"
+      ],
+      "recommended_actions": [
+        "Use transvaginal sonography as the first imaging modality of choice, since it is technically feasible in this patient with a suspicious isolated ovarian mass.",
+        "Do not use Doppler technology alone; combine Doppler with morphological assessment.",
+        "Use combined morphology and Doppler assessment as a high-performing diagnostic approach."
+      ],
+      "rationale": "The vignette fits a technically feasible, suspicious isolated ovarian mass, triggering first-line transvaginal sonography. It also includes consideration of Doppler alone, which is not recommended, and supports the combined morphology-plus-Doppler approach, which has higher diagnostic performance."
+    },
+    "status": "generated"
+  },
+  {
+    "guideline": {
+      "record_index": 9,
+      "id": "43f3fad5ab04c54218779ea3e2a205987f8f58e1",
+      "source": "cco",
+      "title": "None",
+      "extraction_method": "llm"
+    },
+    "selected_rules": [
+      {
+        "rule_id": "R001",
+        "scenario": "GENERAL",
+        "priority": 80,
+        "activation_condition": "Person is considering defining a safe age threshold for first indoor tanning use",
+        "recommendation_class": "NOT_RECOMMENDED",
+        "execute": "Do not use a specific age cut-off as a basis for safety; no cut-off was set by the guideline.",
+        "source_statement": "Based on the evidence, the GDG has not set an age cut-off for \"younger age.\""
+      },
+      {
+        "rule_id": "R002",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person uses indoor tanning devices",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Avoid use of indoor tanning devices to reduce melanoma risk.",
+        "source_statement": "Use of indoor tanning devices should be avoided to reduce risk of melanoma."
+      },
+      {
+        "rule_id": "R003",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person is considering or using indoor tanning devices",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Advise avoidance of indoor tanning devices, especially at younger ages.",
+        "source_statement": "All individuals should avoid use of indoor tanning devices, especially those at a younger age."
+      },
+      {
+        "rule_id": "R004",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person has ever used indoor tanning devices",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Counsel that indoor tanning device use is associated with increased melanoma risk.",
+        "source_statement": "A systematic review with meta-analysis (1) based on pooling of 27 cohort and casecontrol studies found a significant association between ever use of indoor tanning devices and increased risk of developing melanoma (relative risk 1.25: 95% confidence interval 1.09-1.43; p<0.05)."
+      },
+      {
+        "rule_id": "R005",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person is exposed to indoor tanning devices",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Explain that risks from tanning devices outweigh any perceived benefits.",
+        "source_statement": "Given the significant risk of melanoma as a consequence of using tanning devices, the GDG concludes that risks that arise from the use of tanning devices far outweigh any perceived benefit to their use."
+      },
+      {
+        "rule_id": "R006",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person is considering indoor tanning for vitamin D",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Do not use indoor tanning devices for vitamin D; oral supplementation is preferred.",
+        "source_statement": "Although UVB radiation can initiate the production of vitamin D in the skin, there are no data to support that artificial UVR is superior to oral supplementation with vitamin D to increase serum levels of this vitamin."
+      },
+      {
+        "rule_id": "R007",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person is considering indoor tanning devices",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Inform that indoor tanning device UV radiation is a carcinogen.",
+        "source_statement": "The International Agency for Research on Cancer (IARC) recently declared solar ultraviolet radiation (UVR) from indoor tanning devices a carcinogen (2)."
+      },
+      {
+        "rule_id": "R008",
+        "scenario": "GENERAL",
+        "priority": 70,
+        "activation_condition": "Person is considering indoor tanning devices",
+        "recommendation_class": "RECOMMENDED",
+        "execute": "Explain that UVA and UVB can cause DNA damage and mutations.",
+        "source_statement": "Both UVA and UVB have been shown to cause direct DNA damage through production of DNA mutations (UVA at a lower level than UVB), as well as indirect DNA damage via production of reactive oxygen species."
+      }
+    ],
+    "generated_case": {
+      "patient_vignette": "A 22-year-old woman comes to primary care asking whether starting indoor tanning before a beach vacation is “safe” if she only uses a booth a few times. She says a friend told her there should be a cutoff age after which tanning beds become risky, and she also wonders if tanning could help her vitamin D levels during the winter. She has no personal history of skin cancer but reports she has never used a tanning device before and is considering starting now because she likes the cosmetic effect.",
+      "triggered_rule_ids": [
+        "R001",
+        "R003",
+        "R006",
+        "R007"
+      ],
+      "recommended_actions": [
+        "Do not use a specific age cut-off as a basis for safety; no cut-off has been set by the guideline.",
+        "Advise avoidance of indoor tanning devices, especially at younger ages.",
+        "Do not use indoor tanning devices for vitamin D; oral supplementation is preferred.",
+        "Inform the patient that indoor tanning device UV radiation is a carcinogen."
+      ],
+      "rationale": "The vignette explicitly raises the question of a safe age threshold for first indoor tanning use, whether tanning is acceptable at a young age, and whether it should be used for vitamin D, which triggers R001, R003, and R006. Because she is considering indoor tanning devices, R007 also applies. These recommendations are directly supported by the supplied rules and do not add unsupported advice."
+    },
+    "status": "generated"
+  }
+]
