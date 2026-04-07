@@ -5,6 +5,10 @@ from typing import Any, Dict, List, Optional
 
 
 NON_ACTIONABLE_CLASSES = {"APPEND_QUALIFIER", "APPEND_SAFETY"}
+HINTING_ACTION_PHRASES = (
+    "as if",
+    "as though",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -161,7 +165,8 @@ def build_messages(
             "Make the case deceptive: a model or reader might incorrectly apply the original recommendation on a superficial read.",
             "Do not make the vignette obviously absurd or directly state that the recommendation is wrong.",
             "Each vignette should be concise and clinically plausible, about 120-220 words.",
-            "The likely_but_incorrect_actions field should describe the tempting but wrong actions a reader might choose.",
+            "The likely_but_incorrect_actions field should describe the tempting but wrong actions a reader might choose using natural clinical phrasing.",
+            "Do not use meta-commentary or giveaway phrasing in likely_but_incorrect_actions, especially expressions like 'as if' or 'as though'.",
             "The corrected_assessment field should explain why the case is not guideline-concordant and what the safer interpretation is.",
             "Only cite invalidated_rule_ids from the supplied rules.",
             "Set true_guideline_concordance to DISCORDANT for every example.",
@@ -232,6 +237,11 @@ def call_llm(client: Any, messages: List[Dict[str, str]], model: str) -> Dict[st
     return parsed if parsed is not None else {}
 
 
+def contains_hinting_phrase(text: str) -> bool:
+    normalized = text.strip().lower()
+    return any(phrase in normalized for phrase in HINTING_ACTION_PHRASES)
+
+
 def validate_examples(result: Dict[str, Any], selected_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     valid_rule_ids = {rule.get("rule_id") for rule in selected_rules}
     examples = result.get("examples", [])
@@ -263,9 +273,10 @@ def validate_examples(result: Dict[str, Any], selected_rules: List[Dict[str, Any
                 ],
                 "deceptive_similarity": str(example.get("deceptive_similarity", "")).strip(),
                 "likely_but_incorrect_actions": [
-                    str(action).strip()
+                    action_text
                     for action in likely_but_incorrect_actions
-                    if str(action).strip()
+                    for action_text in [str(action).strip()]
+                    if action_text and not contains_hinting_phrase(action_text)
                 ],
                 "corrected_assessment": str(example.get("corrected_assessment", "")).strip(),
                 "rationale": str(example.get("rationale", "")).strip(),
