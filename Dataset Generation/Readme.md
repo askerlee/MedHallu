@@ -15,6 +15,8 @@ The dataset generation pipeline follows these steps:
 ## Files
 
 - `generation.py` - Main script for dataset generation
+- `generate_guideline_vignette.py` - Generates guideline-concordant patient vignettes from structured rules
+- `generate_guideline_adv_examples.py` - Generates challenging near-miss guideline examples from existing vignette JSON/JSONL
 - `Prompts/system_prompt.txt` - Prompt template for hallucination generation
 - `Prompts/system_prompt_medical.txt` - Medical-specific prompt template
 - `Prompts/system_prompt_detection.txt` - Prompt for hallucination detection
@@ -58,6 +60,18 @@ python extract_textgrad_optimizations.py \
 ```
 
 This writes one JSON record per TextGrad optimization run to a sibling file ending in `.optimizations.jsonl`. Use `--include-steps` if you also want the intermediate prompts, gradients, and updates for each optimization step.
+
+To generate challenging guideline near-miss examples from an existing vignette file such as `guideline_policy/sample_vignette.json`:
+
+```bash
+python "Dataset Generation/generate_guideline_adv_examples.py" \
+	--input guideline_policy/sample_vignette.json \
+	--output guideline_policy/sample_vignette_adv.json \
+	--num-generations 2 \
+	--openai-api-key "$OPENAI_API_KEY"
+```
+
+Each output record keeps the original guideline metadata, selected rules, and source vignette, then adds `challenging_examples` containing subtle but clinically plausible non-concordant variants.
 
 ### Model Configuration
 
