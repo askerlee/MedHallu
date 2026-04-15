@@ -416,9 +416,9 @@ def match_action_lists(
         }
 
     if not generated_actions or not reference_actions:
-        precision = 1.0 if not generated_actions and not reference_actions else 0.0
-        recall = 1.0 if not generated_actions and not reference_actions else 0.0
-        f1 = 1.0 if not generated_actions and not reference_actions else 0.0
+        precision = 1.0 if not generated_actions else 0.0
+        recall = 1.0 if not reference_actions else 0.0
+        f1 = safe_divide(2 * precision * recall, precision + recall)
         return {
             "matched_pairs": [],
             "matched_generated_actions": [],
