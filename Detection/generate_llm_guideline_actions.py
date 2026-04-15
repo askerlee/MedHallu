@@ -16,6 +16,9 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from vllm import LLM, SamplingParams
 
 
+VLLM_ENABLE_V1_MULTIPROCESSING = "0"
+
+
 model_names = [
     {"type": "hf", "model_name": "Qwen/Qwen3-4B-Instruct-2507"},
     {"type": "hf", "model_name": "google/medgemma-1.5-4b-it"},
@@ -54,6 +57,12 @@ class EntailmentScorer:
 
         self.model.to(self.device)
         self.model.eval()
+
+    def close(self) -> None:
+        del self.model
+        del self.tokenizer
+        if self.device.type == "cuda":
+            clear_gpu_memory()
 
     def check_entailment(self, premise: str, hypothesis: str) -> float:
         if not premise or not hypothesis:
@@ -122,6 +131,12 @@ def parse_args() -> argparse.Namespace:
         "--openai-api-key",
         default="",
         help="OpenAI API key, required only when OpenAI models are enabled.",
+    )
+    parser.add_argument(
+        "--subprocess-timeout-seconds",
+        type=float,
+        default=0.0,
+        help="Optional timeout for each model subprocess. Use 0 to wait indefinitely.",
     )
     return parser.parse_args()
 
@@ -483,49 +498,106 @@ def clear_gpu_memory() -> None:
             print(f"Skipping CUDA cleanup due to runtime error: {exc}")
 
 
-def evaluate_with_hf(model_name: str, prompts: List[List[Dict[str, str]]]) -> List[str]:
-    llm = LLM(
-        model=model_name,
-        tensor_parallel_size=1,
-        trust_remote_code=True,
-        gpu_memory_utilization=0.85,
-        dtype=torch.bfloat16,
-    )
-    tokenizer = llm.get_tokenizer()
+def shutdown_torch_distributed() -> None:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return
 
-    stop_tok_id: List[int] = []
-    if tokenizer.eos_token_id is not None:
-        stop_tok_id.append(tokenizer.eos_token_id)
-    for special_token in ["<|eot_id|>", "<|eos_token|>", "<end_of_turn>", "</s>"]:
+    try:
+        torch.distributed.destroy_process_group()
+    except Exception as exc:
+        print(f"Skipping torch.distributed cleanup due to runtime error: {exc}")
+
+
+def shutdown_vllm_engine(llm: Optional[LLM]) -> None:
+    if llm is None:
+        return
+
+    llm_engine = getattr(llm, "llm_engine", None)
+    output_processor = getattr(llm_engine, "output_processor", None)
+    if output_processor is not None and hasattr(output_processor, "close"):
         try:
-            sid = tokenizer.convert_tokens_to_ids(special_token)
-            if isinstance(sid, int) and sid not in stop_tok_id:
-                stop_tok_id.append(sid)
-        except Exception:
-            pass
+            output_processor.close()
+        except Exception as exc:
+            print(f"Skipping vLLM output processor cleanup due to runtime error: {exc}")
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=256,
-        stop_token_ids=stop_tok_id,
-    )
+    engine_core = getattr(llm_engine, "engine_core", None)
+    if engine_core is not None and hasattr(engine_core, "shutdown"):
+        try:
+            engine_core.shutdown(timeout=5.0)
+        except Exception as exc:
+            print(f"Skipping vLLM engine core cleanup due to runtime error: {exc}")
 
-    formatted_prompts: List[str] = []
-    for prompt in prompts:
-        formatted_prompts.append(
-            tokenizer.apply_chat_template(
-                prompt,
-                add_generation_prompt=True,
-                tokenize=False,
-            )
+    renderer = getattr(llm_engine, "renderer", None)
+    if renderer is not None and hasattr(renderer, "shutdown"):
+        try:
+            renderer.shutdown()
+        except Exception as exc:
+            print(f"Skipping vLLM renderer cleanup due to runtime error: {exc}")
+
+
+def log_progress(message: str) -> None:
+    print(message, flush=True)
+
+
+def evaluate_with_hf(model_name: str, prompts: List[List[Dict[str, str]]]) -> List[str]:
+    llm: Optional[LLM] = None
+    tokenizer = None
+    previous_vllm_multiprocessing = os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING")
+    try:
+        log_progress(f"[{model_name}] Initializing vLLM engine")
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = VLLM_ENABLE_V1_MULTIPROCESSING
+        llm = LLM(
+            model=model_name,
+            tensor_parallel_size=1,
+            trust_remote_code=True,
+            gpu_memory_utilization=0.85,
+            dtype=torch.bfloat16,
+            async_scheduling=False,
+        )
+        log_progress(f"[{model_name}] vLLM engine ready")
+        tokenizer = llm.get_tokenizer()
+
+        stop_tok_id: List[int] = []
+        if tokenizer.eos_token_id is not None:
+            stop_tok_id.append(tokenizer.eos_token_id)
+        for special_token in ["<|eot_id|>", "<|eos_token|>", "<end_of_turn>", "</s>"]:
+            try:
+                sid = tokenizer.convert_tokens_to_ids(special_token)
+                if isinstance(sid, int) and sid not in stop_tok_id:
+                    stop_tok_id.append(sid)
+            except Exception:
+                pass
+
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=256,
+            stop_token_ids=stop_tok_id,
         )
 
-    outputs = llm.generate(formatted_prompts, sampling_params)
-    responses = [output.outputs[0].text.strip() for output in outputs]
+        formatted_prompts: List[str] = []
+        for prompt in prompts:
+            formatted_prompts.append(
+                tokenizer.apply_chat_template(
+                    prompt,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+            )
 
-    del llm, tokenizer
-    return responses
+        log_progress(f"[{model_name}] Starting generation for {len(formatted_prompts)} prompts")
+        outputs = llm.generate(formatted_prompts, sampling_params)
+        log_progress(f"[{model_name}] Generation finished")
+        return [output.outputs[0].text.strip() for output in outputs]
+    finally:
+        shutdown_vllm_engine(llm)
+        shutdown_torch_distributed()
+        if previous_vllm_multiprocessing is None:
+            os.environ.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
+        else:
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = previous_vllm_multiprocessing
+        del tokenizer
+        del llm
 
 
 def evaluate_with_openai(model_name: str, prompts: List[List[Dict[str, str]]], openai_api_key: str) -> List[str]:
@@ -549,8 +621,6 @@ def evaluate_with_openai(model_name: str, prompts: List[List[Dict[str, str]]], o
 def resolve_entailment_device(device_preference: str, model_type: str) -> str:
     if device_preference in {"cpu", "cuda"}:
         return device_preference
-    if model_type == "hf":
-        return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -591,76 +661,100 @@ def evaluate_model(
     similarity_threshold: float,
     entailment_device: str,
 ) -> Dict[str, pd.DataFrame]:
-    prompts = [create_prompt(row) for _, row in df.iterrows()]
-    if model_config["type"] == "hf":
-        raw_outputs = evaluate_with_hf(model_config["model_name"], prompts)
-    else:
-        raw_outputs = evaluate_with_openai(model_config["model_name"], prompts, openai_api_key)
+    scorer: Optional[EntailmentScorer] = None
+    try:
+        log_progress(f"[{model_config['model_name']}] Building prompts")
+        prompts = [create_prompt(row) for _, row in df.iterrows()]
+        if model_config["type"] == "hf":
+            raw_outputs = evaluate_with_hf(model_config["model_name"], prompts)
+        else:
+            raw_outputs = evaluate_with_openai(model_config["model_name"], prompts, openai_api_key)
 
-    clear_gpu_memory()
-    scorer = EntailmentScorer(resolve_entailment_device(entailment_device, model_config["type"]))
-
-    prediction_df = df.copy()
-    prediction_df["model_name"] = model_config["model_name"]
-    prediction_df["raw_model_output"] = raw_outputs
-    prediction_df["generated_actions"] = [parse_generated_actions(text) for text in raw_outputs]
-
-    match_results = [
-        match_action_lists(generated, reference, scorer, similarity_threshold)
-        for generated, reference in zip(
-            prediction_df["generated_actions"].tolist(),
-            prediction_df["reference_actions"].tolist(),
+        log_progress(f"[{model_config['model_name']}] Loading entailment scorer")
+        clear_gpu_memory()
+        resolved_entailment_device = resolve_entailment_device(
+            entailment_device,
+            model_config["type"],
         )
-    ]
-
-    prediction_df["matched_pairs"] = [result["matched_pairs"] for result in match_results]
-    prediction_df["matched_generated_actions"] = [result["matched_generated_actions"] for result in match_results]
-    prediction_df["matched_reference_actions"] = [result["matched_reference_actions"] for result in match_results]
-    prediction_df["unmatched_generated_actions"] = [result["unmatched_generated_actions"] for result in match_results]
-    prediction_df["unmatched_reference_actions"] = [result["unmatched_reference_actions"] for result in match_results]
-    prediction_df["num_matched_actions"] = [result["num_matched_actions"] for result in match_results]
-    prediction_df["action_precision"] = [result["action_precision"] for result in match_results]
-    prediction_df["action_recall"] = [result["action_recall"] for result in match_results]
-    prediction_df["action_f1"] = [result["action_f1"] for result in match_results]
-    prediction_df["exact_match"] = [result["exact_match"] for result in match_results]
-    prediction_df["average_match_score"] = [result["average_match_score"] for result in match_results]
-    prediction_df["num_generated_actions"] = prediction_df["generated_actions"].apply(len)
-    prediction_df["num_reference_actions"] = prediction_df["reference_actions"].apply(len)
-    prediction_df["num_unmatched_generated_actions"] = prediction_df["unmatched_generated_actions"].apply(len)
-    prediction_df["num_unmatched_reference_actions"] = prediction_df["unmatched_reference_actions"].apply(len)
-    prediction_df["decision"] = prediction_df["exact_match"].apply(
-        lambda exact_match: "Correct" if exact_match else "Incorrect"
-    )
-
-    for column in [
-        "generated_actions",
-        "reference_actions",
-        "matched_pairs",
-        "matched_generated_actions",
-        "matched_reference_actions",
-        "unmatched_generated_actions",
-        "unmatched_reference_actions",
-        "reference_rule_ids",
-    ]:
-        prediction_df[column] = prediction_df[column].apply(json.dumps)
-
-    summary_rows = [summarize_slice(prediction_df, model_config["model_name"], "overall")]
-
-    for case_kind, slice_df in prediction_df.groupby("case_kind", dropna=False):
-        summary_rows.append(
-            summarize_slice(slice_df, model_config["model_name"], str(case_kind))
+        scorer = EntailmentScorer(resolved_entailment_device)
+        log_progress(
+            f"[{model_config['model_name']}] Entailment scorer ready on {resolved_entailment_device}"
         )
 
-    for action_count, slice_df in prediction_df.groupby("num_reference_actions", dropna=False):
-        summary_rows.append(
-            summarize_slice(slice_df, model_config["model_name"], f"reference_actions_{action_count}")
+        prediction_df = df.copy()
+        prediction_df["model_name"] = model_config["model_name"]
+        prediction_df["raw_model_output"] = raw_outputs
+        prediction_df["generated_actions"] = [parse_generated_actions(text) for text in raw_outputs]
+
+        log_progress(f"[{model_config['model_name']}] Matching generated and reference actions")
+        match_results = [
+            match_action_lists(generated, reference, scorer, similarity_threshold)
+            for generated, reference in tqdm(
+                zip(
+                    prediction_df["generated_actions"].tolist(),
+                    prediction_df["reference_actions"].tolist(),
+                ),
+                total=len(prediction_df),
+                desc=f"Action matching ({model_config['model_name']})",
+                leave=False,
+            )
+        ]
+        log_progress(f"[{model_config['model_name']}] Action matching finished")
+
+        prediction_df["matched_pairs"] = [result["matched_pairs"] for result in match_results]
+        prediction_df["matched_generated_actions"] = [result["matched_generated_actions"] for result in match_results]
+        prediction_df["matched_reference_actions"] = [result["matched_reference_actions"] for result in match_results]
+        prediction_df["unmatched_generated_actions"] = [result["unmatched_generated_actions"] for result in match_results]
+        prediction_df["unmatched_reference_actions"] = [result["unmatched_reference_actions"] for result in match_results]
+        prediction_df["num_matched_actions"] = [result["num_matched_actions"] for result in match_results]
+        prediction_df["action_precision"] = [result["action_precision"] for result in match_results]
+        prediction_df["action_recall"] = [result["action_recall"] for result in match_results]
+        prediction_df["action_f1"] = [result["action_f1"] for result in match_results]
+        prediction_df["exact_match"] = [result["exact_match"] for result in match_results]
+        prediction_df["average_match_score"] = [result["average_match_score"] for result in match_results]
+        prediction_df["num_generated_actions"] = prediction_df["generated_actions"].apply(len)
+        prediction_df["num_reference_actions"] = prediction_df["reference_actions"].apply(len)
+        prediction_df["num_unmatched_generated_actions"] = prediction_df["unmatched_generated_actions"].apply(len)
+        prediction_df["num_unmatched_reference_actions"] = prediction_df["unmatched_reference_actions"].apply(len)
+        prediction_df["decision"] = prediction_df["exact_match"].apply(
+            lambda exact_match: "Correct" if exact_match else "Incorrect"
         )
 
-    summary_df = truncate_numeric_values(pd.DataFrame(summary_rows), digits=3)
-    return {
-        "predictions": prediction_df,
-        "summary": summary_df,
-    }
+        for column in [
+            "generated_actions",
+            "reference_actions",
+            "matched_pairs",
+            "matched_generated_actions",
+            "matched_reference_actions",
+            "unmatched_generated_actions",
+            "unmatched_reference_actions",
+            "reference_rule_ids",
+        ]:
+            prediction_df[column] = prediction_df[column].apply(json.dumps)
+
+        summary_rows = [summarize_slice(prediction_df, model_config["model_name"], "overall")]
+
+        for case_kind, slice_df in prediction_df.groupby("case_kind", dropna=False):
+            summary_rows.append(
+                summarize_slice(slice_df, model_config["model_name"], str(case_kind))
+            )
+
+        for action_count, slice_df in prediction_df.groupby("num_reference_actions", dropna=False):
+            summary_rows.append(
+                summarize_slice(slice_df, model_config["model_name"], f"reference_actions_{action_count}")
+            )
+
+        summary_df = truncate_numeric_values(pd.DataFrame(summary_rows), digits=3)
+        log_progress(f"[{model_config['model_name']}] Evaluation finished")
+        return {
+            "predictions": prediction_df,
+            "summary": summary_df,
+        }
+    finally:
+        if scorer is not None:
+            scorer.close()
+        shutdown_torch_distributed()
+        clear_gpu_memory()
 
 
 def run_model_subprocess(
@@ -673,6 +767,7 @@ def run_model_subprocess(
     entailment_device: str,
 ) -> None:
     try:
+        log_progress(f"[{model_config['model_name']}] Loading evaluation dataset")
         df = pd.read_json(eval_df_path, orient="records")
         outputs = evaluate_model(
             model_config,
@@ -684,6 +779,7 @@ def run_model_subprocess(
 
         predictions = outputs["predictions"]
         summary = outputs["summary"]
+        log_progress(f"[{model_config['model_name']}] Writing CSV outputs")
 
         if os.path.exists(predictions_csv):
             predictions.to_csv(predictions_csv, mode="a", header=False, index=False)
@@ -694,9 +790,11 @@ def run_model_subprocess(
             summary.to_csv(results_csv, mode="a", header=False, index=False)
         else:
             summary.to_csv(results_csv, mode="w", header=True, index=False)
+        log_progress(f"[{model_config['model_name']}] Subprocess work completed")
     except Exception as exc:
         print(f"Error evaluating {model_config['model_name']}: {exc}")
     finally:
+        shutdown_torch_distributed()
         clear_gpu_memory()
 
 
@@ -711,6 +809,8 @@ def main() -> None:
 
     if not 0.0 <= args.similarity_threshold <= 1.0:
         raise ValueError("--similarity-threshold must be between 0 and 1.")
+    if args.subprocess_timeout_seconds < 0.0:
+        raise ValueError("--subprocess-timeout-seconds must be greater than or equal to 0.")
 
     openai_api_key = args.openai_api_key.strip()
     requires_openai_key = any(model_config.get("type") == "openai" for model_config in model_names)
@@ -747,7 +847,20 @@ def main() -> None:
             ),
         )
         proc.start()
-        proc.join()
+        if args.subprocess_timeout_seconds > 0.0:
+            proc.join(timeout=args.subprocess_timeout_seconds)
+        else:
+            proc.join()
+        if args.subprocess_timeout_seconds > 0.0 and proc.is_alive():
+            print(
+                f"Timed out waiting for {model_config['model_name']} to exit cleanly; terminating subprocess."
+            )
+            proc.terminate()
+            proc.join()
+        exit_code = proc.exitcode
+        proc.close()
+        if exit_code not in {0, None}:
+            print(f"Subprocess for {model_config['model_name']} exited with code {exit_code}")
         print(f"Completed {model_config['model_name']}")
 
     if os.path.exists(temp_eval_df_path):
