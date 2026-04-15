@@ -166,9 +166,13 @@ def build_messages(
             "Do not make the vignette obviously absurd or directly state that the recommendation is wrong.",
             "Each vignette should be concise and clinically plausible, about 120-220 words.",
             "The likely_but_incorrect_actions field should describe the tempting but wrong actions a reader might choose using natural clinical phrasing.",
+            "The recommended_actions field should contain the true guideline-concordant actions for the modified vignette.",
+            "If the modified vignette no longer triggers any supplied rule, set recommended_actions to an empty list and triggered_rule_ids to an empty list.",
+            "If other supplied rules still apply after the modification, list those actions in recommended_actions and include their IDs in triggered_rule_ids.",
             "Do not use meta-commentary or giveaway phrasing in likely_but_incorrect_actions, especially expressions like 'as if' or 'as though'.",
             "The corrected_assessment field should explain why the case is not guideline-concordant and what the safer interpretation is.",
             "Only cite invalidated_rule_ids from the supplied rules.",
+            "Only cite triggered_rule_ids from the supplied rules that truly apply to the modified vignette.",
             "Set true_guideline_concordance to DISCORDANT for every example.",
             "Difficulty should be easy, medium, or hard depending on how subtle the mismatch is.",
         ],
@@ -177,8 +181,10 @@ def build_messages(
                 {
                     "patient_vignette": "string",
                     "invalidated_rule_ids": ["R001"],
+                    "triggered_rule_ids": ["R002"],
                     "deceptive_similarity": "string",
                     "likely_but_incorrect_actions": ["string"],
+                    "recommended_actions": ["string"],
                     "corrected_assessment": "string",
                     "rationale": "string",
                     "true_guideline_concordance": "DISCORDANT",
@@ -257,9 +263,17 @@ def validate_examples(result: Dict[str, Any], selected_rules: List[Dict[str, Any
         if not isinstance(invalidated_rule_ids, list):
             invalidated_rule_ids = []
 
+        triggered_rule_ids = example.get("triggered_rule_ids", [])
+        if not isinstance(triggered_rule_ids, list):
+            triggered_rule_ids = []
+
         likely_but_incorrect_actions = example.get("likely_but_incorrect_actions", [])
         if not isinstance(likely_but_incorrect_actions, list):
             likely_but_incorrect_actions = []
+
+        recommended_actions = example.get("recommended_actions", [])
+        if not isinstance(recommended_actions, list):
+            recommended_actions = []
 
         difficulty = str(example.get("difficulty", "medium")).strip().lower()
         if difficulty not in {"easy", "medium", "hard"}:
@@ -271,12 +285,20 @@ def validate_examples(result: Dict[str, Any], selected_rules: List[Dict[str, Any
                 "invalidated_rule_ids": [
                     rule_id for rule_id in invalidated_rule_ids if rule_id in valid_rule_ids
                 ],
+                "triggered_rule_ids": [
+                    rule_id for rule_id in triggered_rule_ids if rule_id in valid_rule_ids
+                ],
                 "deceptive_similarity": str(example.get("deceptive_similarity", "")).strip(),
                 "likely_but_incorrect_actions": [
                     action_text
                     for action in likely_but_incorrect_actions
                     for action_text in [str(action).strip()]
                     if action_text and not contains_hinting_phrase(action_text)
+                ],
+                "recommended_actions": [
+                    str(action).strip()
+                    for action in recommended_actions
+                    if str(action).strip()
                 ],
                 "corrected_assessment": str(example.get("corrected_assessment", "")).strip(),
                 "rationale": str(example.get("rationale", "")).strip(),

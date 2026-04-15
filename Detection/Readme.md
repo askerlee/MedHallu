@@ -21,6 +21,7 @@ ds = load_dataset("UTAustin-AIHealth/MedHallu", "pqa_labeled")
 - `detection_vllm_notsurecase.py` - Script for evaluating LLMs with a "not sure" option
 - `detect_llm_advcase.py` - Existing hallucination-focused adversarial evaluation script
 - `detect_llm_guideline_cases.py` - Evaluates whether LLMs can distinguish guideline-concordant source cases from guideline-violating near-miss cases
+- `generate_llm_guideline_actions.py` - Generates guideline-supported actions for each case and scores them against reference actions with semantic matching
 - `bidirectional_checking.py` - Utility for comparing semantic similarity between answers
 - `Mesh.py` - Tool for analyzing MeSH (Medical Subject Headings) categories
 
@@ -97,6 +98,26 @@ python detect_llm_guideline_cases.py \
 By default, this script reads both the concordant `source_case` entries and the discordant `challenging_examples` entries from the adversarial file. Use `--groundtruth-path` only if you want to override the concordant cases with a separate source vignette file.
 
 This script uses the structured guideline rules as the reference standard, judges each vignette together with its proposed actions, and reports both per-example predictions and summary metrics for the three configured LLMs.
+
+To run the generative action evaluator on cases with reference recommended actions:
+
+```bash
+python generate_llm_guideline_actions.py \
+    --cases-path ../guideline_policy/sample_vignette.json \
+    --predictions-csv ../guideline_policy/generative_guideline_action_predictions.csv \
+    --results-csv ../guideline_policy/generative_guideline_action_results.csv
+```
+
+This script prompts each configured LLM to generate a JSON list of recommended actions from the vignette plus structured rules, then compares the generated actions to the reference action list using bidirectional entailment matching from `roberta-large-mnli`. The summary CSV reports exact-match rate and mean action-level precision, recall, and F1.
+
+If your adversarial file includes gold `recommended_actions` for each `challenging_examples` entry, the same script can also score near-miss cases generatively:
+
+```bash
+python generate_llm_guideline_actions.py \
+    --cases-path ../guideline_policy/sample_vignette_adv.json \
+    --predictions-csv ../guideline_policy/generative_guideline_action_adv_predictions.csv \
+    --results-csv ../guideline_policy/generative_guideline_action_adv_results.csv
+```
 
 ### Bidirectional Checking
 

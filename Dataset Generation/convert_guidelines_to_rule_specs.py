@@ -22,14 +22,6 @@ SCENARIO_PATTERNS: List[Tuple[str, str]] = [
     (r"solitary metastasis", "SOLITARY_METASTASIS_AT_RECURRENCE"),
 ]
 
-CONDITION_HINT_PATTERNS: List[re.Pattern[str]] = [
-    re.compile(r"\bonly when\b(.+?)(?:\.|;|$)", re.IGNORECASE),
-    re.compile(r"\bwhen\b(.+?)(?:\.|;|$)", re.IGNORECASE),
-    re.compile(r"\bif\b(.+?)(?:\.|;|$)", re.IGNORECASE),
-    re.compile(r"\bfor patients?\b(.+?)(?:\.|;|$)", re.IGNORECASE),
-    re.compile(r"\bin patients?\b(.+?)(?:\.|;|$)", re.IGNORECASE),
-]
-
 ALLOWED_SCENARIOS = {
     "INITIAL_DIAGNOSIS",
     "PREOP_STAGING",
@@ -88,23 +80,10 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated candidate text fields in priority order.",
     )
     parser.add_argument(
-        "--engine",
-        type=str,
-        default="llm",
-        choices=["llm", "hybrid", "regex"],
-        help="Rule extraction engine. 'llm' is primary. 'hybrid' uses regex fallback.",
-    )
-    parser.add_argument(
         "--llm-model",
         type=str,
         default="gpt-5.4-mini",
         help="LLM model used for rule extraction.",
-    )
-    parser.add_argument(
-        "--openai-api-key",
-        type=str,
-        default="",
-        help="OpenAI API key. If empty, OPENAI_API_KEY env var is used.",
     )
     parser.add_argument(
         "--openai-base-url",
@@ -117,11 +96,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="Upper bound of rules requested from LLM per record.",
-    )
-    parser.add_argument(
-        "--allow-regex-fallback",
-        action="store_true",
-        help="If LLM parsing fails, fallback to regex extraction for predictable patterns.",
     )
     return parser.parse_args()
 
@@ -140,20 +114,6 @@ def safe_int(value: Any, default: int) -> int:
         return default
 
 
-def to_sentence_chunks(text: str) -> List[str]:
-    # Keep line and sentence boundaries to preserve recommendation statements.
-    blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
-    chunks: List[str] = []
-    for block in blocks:
-        block = re.sub(r"\s+", " ", block).strip()
-        # Split long blocks into sentence-like chunks.
-        for sent in re.split(r"(?<=[\.!?])\s+", block):
-            sent = sent.strip(" -\t")
-            if sent:
-                chunks.append(sent)
-    return chunks
-
-
 def infer_scenario(text: str) -> str:
     lower = text.lower()
     for pattern, scenario in SCENARIO_PATTERNS:
@@ -167,16 +127,6 @@ def infer_recommendation_class(text: str) -> Optional[str]:
     for pattern, rec_class in RECOMMENDATION_PATTERNS:
         if re.search(pattern, lower, flags=re.IGNORECASE):
             return rec_class
-    return None
-
-
-def extract_condition_hint(text: str) -> Optional[str]:
-    for pattern in CONDITION_HINT_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            clause = match.group(1).strip(" ,;:")
-            if clause:
-                return clause
     return None
 
 
@@ -372,38 +322,6 @@ def extract_text_from_record(record: Dict[str, Any], preferred_fields: List[str]
     return normalize_text("\n".join(text_values))
 
 
-def regex_rule_extraction(text: str) -> List[Dict[str, Any]]:
-    chunks = to_sentence_chunks(text)
-    rules: List[Dict[str, Any]] = []
-
-    for chunk in chunks:
-        rec_class = infer_recommendation_class(chunk)
-        if rec_class is None:
-            continue
-
-        scenario = infer_scenario(chunk)
-        condition_hint = extract_condition_hint(chunk)
-        activation_condition = (
-            f"scenario={scenario} AND {condition_hint}"
-            if condition_hint
-            else f"scenario={scenario}"
-        )
-
-        rules.append(
-            {
-                "rule_id": f"R{len(rules) + 1:03d}",
-                "scenario": scenario,
-                "priority": priority_for_class(rec_class),
-                "activation_condition": activation_condition,
-                "recommendation_class": rec_class,
-                "execute": derive_execute_action(chunk, rec_class),
-                "source_statement": chunk,
-            }
-        )
-
-    return rules
-
-
 def append_global_wrapper_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out_rules = list(rules)
 
@@ -446,38 +364,28 @@ def append_global_wrapper_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, A
 
 def build_rule_spec_from_text(
     text: str,
-    engine: str,
-    llm_client: Optional[Any],
+    llm_client: Any,
     llm_model: str,
     max_llm_rules: int,
-    allow_regex_fallback: bool,
 ) -> Dict[str, Any]:
-    extraction_method = "regex"
+    extraction_method = "llm"
     extraction_errors: List[str] = []
 
     rules: List[Dict[str, Any]] = []
-    if engine in {"llm", "hybrid"}:
-        if llm_client is None:
-            extraction_errors.append("LLM client unavailable")
-        else:
-            try:
-                llm_payload = call_llm_extract_rules(
-                    client=llm_client,
-                    model=llm_model,
-                    guideline_text=text,
-                    max_rules=max_llm_rules,
-                )
-                rules = validate_llm_rules(llm_payload)
-                if rules:
-                    extraction_method = "llm"
-                else:
-                    extraction_errors.append("LLM returned no valid rules")
-            except Exception as exc:  # Defensive, keeps batch processing robust.
-                extraction_errors.append(f"LLM extraction failed: {exc}")
-
-    if not rules and (engine == "regex" or allow_regex_fallback or engine == "hybrid"):
-        rules = regex_rule_extraction(text)
-        extraction_method = "regex_fallback" if engine != "regex" else "regex"
+    try:
+        llm_payload = call_llm_extract_rules(
+            client=llm_client,
+            model=llm_model,
+            guideline_text=text,
+            max_rules=max_llm_rules,
+        )
+        rules = validate_llm_rules(llm_payload)
+        if not rules:
+            extraction_method = "llm_no_valid_rules"
+            extraction_errors.append("LLM returned no valid rules")
+    except Exception as exc:  # Defensive, keeps batch processing robust.
+        extraction_method = "llm_failed"
+        extraction_errors.append(f"LLM extraction failed: {exc}")
 
     final_rules = append_global_wrapper_rules(rules)
 
@@ -533,41 +441,41 @@ def main() -> None:
 
     preferred_fields = [f.strip() for f in args.text_fields.split(",") if f.strip()]
 
-    llm_client: Optional[Any] = None
-    if args.engine in {"llm", "hybrid"}:
-        api_key = args.openai_api_key.strip() or os.environ.get("OPENAI_API_KEY", "").strip()
-        if api_key:
-            try:
-                from openai import OpenAI
-            except ImportError as exc:
-                raise SystemExit(
-                    "Missing dependency 'openai'. Install it with: pip install openai"
-                ) from exc
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit(
+            "No API key found. Set OPENAI_API_KEY."
+        )
 
-            client_kwargs: Dict[str, Any] = {"api_key": api_key}
-            if args.openai_base_url.strip():
-                client_kwargs["base_url"] = args.openai_base_url.strip()
-            llm_client = OpenAI(**client_kwargs)
-        elif args.engine == "llm":
-            raise SystemExit(
-                "LLM engine requested but no API key found. Provide --openai-api-key or set OPENAI_API_KEY."
-            )
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing dependency 'openai'. Install it with: pip install openai"
+        ) from exc
+
+    client_kwargs: Dict[str, Any] = {"api_key": api_key}
+    if args.openai_base_url.strip():
+        client_kwargs["base_url"] = args.openai_base_url.strip()
+    llm_client = OpenAI(**client_kwargs)
 
     dataset = load_dataset(args.dataset, split=args.split)
     n = min(args.first_n, len(dataset))
 
     enriched_rows: List[Dict[str, Any]] = []
-    method_counts: Dict[str, int] = {"llm": 0, "regex": 0, "regex_fallback": 0}
+    method_counts: Dict[str, int] = {
+        "llm": 0,
+        "llm_no_valid_rules": 0,
+        "llm_failed": 0,
+    }
     for i in tqdm(range(n), total=n, desc="Converting records"):
         record = dict(dataset[i])
         guideline_text = extract_text_from_record(record, preferred_fields)
         rule_spec = build_rule_spec_from_text(
             text=guideline_text,
-            engine=args.engine,
             llm_client=llm_client,
             llm_model=args.llm_model,
             max_llm_rules=safe_int(args.max_llm_rules, 30),
-            allow_regex_fallback=args.allow_regex_fallback,
         )
         method = rule_spec.get("engine_metadata", {}).get("extraction_method", "regex")
         if method in method_counts:
