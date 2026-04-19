@@ -20,9 +20,10 @@ VLLM_ENABLE_V1_MULTIPROCESSING = "0"
 
 
 model_names = [
-    {"type": "hf", "model_name": "Qwen/Qwen3-4B-Instruct-2507"},
-    {"type": "hf", "model_name": "google/medgemma-1.5-4b-it"},
-    {"type": "hf", "model_name": "google/medgemma-27b-text-it"},
+    #{"type": "hf", "model_name": "Qwen/Qwen3-4B-Instruct-2507"},
+    #{"type": "hf", "model_name": "google/medgemma-1.5-4b-it"},
+    #{"type": "hf", "model_name": "google/medgemma-27b-text-it"},
+    {"type": "hf", "model_name": "Qwen/Qwen3.6-35B-A3B"},
     # {"type": "openai", "model_name": "gpt-5-mini"},
 ]
 
@@ -820,11 +821,6 @@ def main() -> None:
     eval_df = prepare_eval_df(args.cases_path.strip(), args.max_cases)
     ensure_parent_dir(args.predictions_csv)
     ensure_parent_dir(args.results_csv)
-
-    if os.path.exists(args.predictions_csv):
-        os.remove(args.predictions_csv)
-    if os.path.exists(args.results_csv):
-        os.remove(args.results_csv)
 
     temp_eval_df_path = os.path.join(
         os.path.dirname(args.results_csv) or ".",
