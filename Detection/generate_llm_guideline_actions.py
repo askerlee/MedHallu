@@ -124,6 +124,23 @@ def parse_args() -> argparse.Namespace:
         help="Optional existing predictions CSV to convert into a diagnostics CSV without rerunning model generation.",
     )
     parser.add_argument(
+        "--prediction_file",
+        dest="legacy_prediction_file",
+        default="",
+        help="Backward-compatible alias for --diagnose-predictions-csv.",
+    )
+    parser.add_argument(
+        "--output_file",
+        dest="legacy_output_file",
+        default="",
+        help="Backward-compatible alias for --diagnostics-csv.",
+    )
+    parser.add_argument(
+        "--diagnostics_only",
+        action="store_true",
+        help="Backward-compatible flag for diagnostics-only mode. Requires --prediction_file or --diagnose-predictions-csv.",
+    )
+    parser.add_argument(
         "--similarity-threshold",
         type=float,
         default=0.5,
@@ -227,6 +244,56 @@ def deduplicate_actions(actions: List[str]) -> List[str]:
         seen.add(normalized)
         deduplicated.append(str(action).strip())
     return deduplicated
+
+
+def normalized_tokens(text: str) -> set[str]:
+    normalized = normalize_text(text)
+    return {token for token in normalized.split() if token}
+
+
+def lexical_overlap_ratio(text1: str, text2: str) -> float:
+    tokens1 = normalized_tokens(text1)
+    tokens2 = normalized_tokens(text2)
+    if not tokens1 or not tokens2:
+        return 0.0
+    return safe_divide(len(tokens1 & tokens2), min(len(tokens1), len(tokens2)))
+
+
+def deduplicate_reference_actions_semantically(
+    reference_actions: List[str],
+    scorer: EntailmentScorer,
+    similarity_threshold: float,
+) -> Dict[str, List[str]]:
+    deduplicated_actions = deduplicate_actions(reference_actions)
+    kept_actions: List[str] = []
+    removed_actions: List[str] = []
+
+    for candidate_action in deduplicated_actions:
+        is_redundant = False
+        for kept_action in kept_actions:
+            bidirectional_similarity = scorer.bidirectional_score(candidate_action, kept_action)
+            lexical_overlap = lexical_overlap_ratio(candidate_action, kept_action)
+            if bidirectional_similarity >= similarity_threshold:
+                is_redundant = True
+            else:
+                forward_entailment = scorer.check_entailment(candidate_action, kept_action)
+                backward_entailment = scorer.check_entailment(kept_action, candidate_action)
+                is_redundant = (
+                    lexical_overlap >= 0.5
+                    and max(forward_entailment, backward_entailment) >= similarity_threshold
+                )
+
+            if is_redundant:
+                removed_actions.append(candidate_action)
+                break
+
+        if not is_redundant:
+            kept_actions.append(candidate_action)
+
+    return {
+        "deduplicated_actions": kept_actions,
+        "removed_actions": removed_actions,
+    }
 
 
 def flatten_reference_cases(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -767,6 +834,8 @@ def build_diagnostic_df(prediction_df: pd.DataFrame, match_results: List[Dict[st
     ]
     diagnostic_df["generated_actions_text"] = diagnostic_df["generated_actions"].apply(summarize_actions)
     diagnostic_df["reference_actions_text"] = diagnostic_df["reference_actions"].apply(summarize_actions)
+    diagnostic_df["original_reference_actions_text"] = diagnostic_df["original_reference_actions"].apply(summarize_actions)
+    diagnostic_df["redundant_reference_actions_text"] = diagnostic_df["redundant_reference_actions"].apply(summarize_actions)
     diagnostic_df["matched_pairs_text"] = [
         " | ".join(
             f"{pair['generated_action']} => {pair['reference_action']} ({pair['score']:.3f})"
@@ -793,7 +862,9 @@ def build_diagnostic_df(prediction_df: pd.DataFrame, match_results: List[Dict[st
         "num_matched_actions",
         "num_unmatched_generated_actions",
         "num_unmatched_reference_actions",
+        "original_reference_actions_text",
         "reference_actions_text",
+        "redundant_reference_actions_text",
         "generated_actions_text",
         "matched_actions_text",
         "missed_reference_actions_text",
@@ -862,39 +933,126 @@ def maybe_switch_default_output_paths(args: argparse.Namespace) -> None:
         args.diagnostics_csv = DEFAULT_DIAGNOSTICS_CSV.replace("_diagnostics.csv", "_adv_diagnostics.csv")
 
 
-def build_diagnostic_df_from_predictions_csv(predictions_csv: str) -> pd.DataFrame:
+def build_diagnostic_df_from_predictions_csv(
+    predictions_csv: str,
+    similarity_threshold: float,
+    entailment_device: str,
+) -> pd.DataFrame:
     prediction_df = pd.read_csv(predictions_csv)
 
     json_columns = [
         "generated_actions",
         "reference_actions",
+        "original_reference_actions",
         "matched_pairs",
         "matched_generated_actions",
         "matched_reference_actions",
         "unmatched_generated_actions",
         "unmatched_reference_actions",
+        "redundant_reference_actions",
         "reference_rule_ids",
     ]
     for column in json_columns:
         if column in prediction_df.columns:
             prediction_df[column] = prediction_df[column].apply(parse_json_cell)
 
+    if "original_reference_actions" not in prediction_df.columns:
+        prediction_df["original_reference_actions"] = prediction_df["reference_actions"].apply(
+            lambda actions: list(actions) if isinstance(actions, list) else []
+        )
+
+    scorer: Optional[EntailmentScorer] = None
+    try:
+        resolved_entailment_device = resolve_entailment_device(entailment_device, "hf")
+        scorer = EntailmentScorer(resolved_entailment_device)
+        reference_dedup_results = [
+            deduplicate_reference_actions_semantically(reference_actions, scorer, similarity_threshold)
+            for reference_actions in tqdm(
+                prediction_df["original_reference_actions"].tolist(),
+                total=len(prediction_df),
+                desc="Reference dedup (diagnostics-only)",
+                leave=False,
+            )
+        ]
+        prediction_df["reference_actions"] = [
+            result["deduplicated_actions"] for result in reference_dedup_results
+        ]
+        prediction_df["redundant_reference_actions"] = [
+            result["removed_actions"] for result in reference_dedup_results
+        ]
+    finally:
+        if scorer is not None:
+            scorer.close()
+        clear_gpu_memory()
+
     match_results: List[Dict[str, Any]] = []
     for _, row in prediction_df.iterrows():
+        generated_actions = row.get("generated_actions", [])
+        reference_actions = row.get("reference_actions", [])
         matched_pairs = row.get("matched_pairs", [])
+
+        deduped_matched_pairs = [
+            pair
+            for pair in matched_pairs if pair.get("reference_action") in set(reference_actions)
+        ]
+        deduped_matched_generated_actions = [
+            pair.get("generated_action", "") for pair in deduped_matched_pairs
+        ]
+        deduped_matched_reference_actions = [
+            pair.get("reference_action", "") for pair in deduped_matched_pairs
+        ]
+        matched_generated_set = set(deduped_matched_generated_actions)
+        matched_reference_set = set(deduped_matched_reference_actions)
+        unmatched_generated_actions = [
+            action for action in generated_actions if action not in matched_generated_set
+        ]
+        unmatched_reference_actions = [
+            action for action in reference_actions if action not in matched_reference_set
+        ]
+        num_matched_actions = len(deduped_matched_pairs)
+        action_precision = safe_divide(num_matched_actions, len(generated_actions))
+        action_recall = safe_divide(num_matched_actions, len(reference_actions))
+        action_f1 = safe_divide(2 * action_precision * action_recall, action_precision + action_recall)
+        exact_match = int(
+            num_matched_actions == len(generated_actions) == len(reference_actions)
+        )
+
         match_results.append(
             {
-                "matched_pairs": matched_pairs if isinstance(matched_pairs, list) else [],
-                "matched_generated_actions": row.get("matched_generated_actions", []),
-                "matched_reference_actions": row.get("matched_reference_actions", []),
-                "unmatched_generated_actions": row.get("unmatched_generated_actions", []),
-                "unmatched_reference_actions": row.get("unmatched_reference_actions", []),
-                "num_matched_actions": int(row.get("num_matched_actions", 0)),
-                "num_unmatched_generated_actions": int(row.get("num_unmatched_generated_actions", 0)),
-                "num_unmatched_reference_actions": int(row.get("num_unmatched_reference_actions", 0)),
-                "exact_match": int(row.get("exact_match", 0)),
+                "matched_pairs": deduped_matched_pairs,
+                "matched_generated_actions": deduped_matched_generated_actions,
+                "matched_reference_actions": deduped_matched_reference_actions,
+                "unmatched_generated_actions": unmatched_generated_actions,
+                "unmatched_reference_actions": unmatched_reference_actions,
+                "num_matched_actions": num_matched_actions,
+                "num_unmatched_generated_actions": len(unmatched_generated_actions),
+                "num_unmatched_reference_actions": len(unmatched_reference_actions),
+                "exact_match": exact_match,
+                "action_precision": action_precision,
+                "action_recall": action_recall,
+                "action_f1": action_f1,
+                "average_match_score": float(np.mean([pair.get("score", 0.0) for pair in deduped_matched_pairs])) if deduped_matched_pairs else 0.0,
             }
         )
+
+    prediction_df["matched_pairs"] = [result["matched_pairs"] for result in match_results]
+    prediction_df["matched_generated_actions"] = [result["matched_generated_actions"] for result in match_results]
+    prediction_df["matched_reference_actions"] = [result["matched_reference_actions"] for result in match_results]
+    prediction_df["unmatched_generated_actions"] = [result["unmatched_generated_actions"] for result in match_results]
+    prediction_df["unmatched_reference_actions"] = [result["unmatched_reference_actions"] for result in match_results]
+    prediction_df["num_matched_actions"] = [result["num_matched_actions"] for result in match_results]
+    prediction_df["action_precision"] = [result["action_precision"] for result in match_results]
+    prediction_df["action_recall"] = [result["action_recall"] for result in match_results]
+    prediction_df["action_f1"] = [result["action_f1"] for result in match_results]
+    prediction_df["exact_match"] = [result["exact_match"] for result in match_results]
+    prediction_df["average_match_score"] = [result["average_match_score"] for result in match_results]
+    prediction_df["num_generated_actions"] = prediction_df["generated_actions"].apply(len)
+    prediction_df["num_reference_actions"] = prediction_df["reference_actions"].apply(len)
+    prediction_df["num_unmatched_generated_actions"] = [result["num_unmatched_generated_actions"] for result in match_results]
+    prediction_df["num_unmatched_reference_actions"] = [result["num_unmatched_reference_actions"] for result in match_results]
+    prediction_df["decision"] = prediction_df["exact_match"].apply(
+        lambda exact_match: "Correct" if exact_match else "Incorrect"
+    )
 
     return build_diagnostic_df(prediction_df, match_results)
 
@@ -939,6 +1097,27 @@ def evaluate_model(
         prediction_df["model_name"] = model_config["model_name"]
         prediction_df["raw_model_output"] = raw_outputs
         prediction_df["generated_actions"] = [parse_generated_actions(text) for text in raw_outputs]
+        prediction_df["original_reference_actions"] = prediction_df["reference_actions"].apply(list)
+
+        log_progress(f"[{model_config['model_name']}] Collapsing redundant reference actions")
+        reference_dedup_results = [
+            deduplicate_reference_actions_semantically(reference_actions, scorer, similarity_threshold)
+            for reference_actions in tqdm(
+                prediction_df["reference_actions"].tolist(),
+                total=len(prediction_df),
+                desc=f"Reference dedup ({model_config['model_name']})",
+                leave=False,
+            )
+        ]
+        prediction_df["reference_actions"] = [
+            result["deduplicated_actions"] for result in reference_dedup_results
+        ]
+        prediction_df["redundant_reference_actions"] = [
+            result["removed_actions"] for result in reference_dedup_results
+        ]
+        prediction_df["reference_actions_text"] = prediction_df["reference_actions"].apply(
+            lambda actions: "\n".join(f"- {action}" for action in actions)
+        )
 
         log_progress(f"[{model_config['model_name']}] Matching generated and reference actions")
         match_results = [
@@ -977,11 +1156,13 @@ def evaluate_model(
         for column in [
             "generated_actions",
             "reference_actions",
+            "original_reference_actions",
             "matched_pairs",
             "matched_generated_actions",
             "matched_reference_actions",
             "unmatched_generated_actions",
             "unmatched_reference_actions",
+            "redundant_reference_actions",
             "reference_rule_ids",
         ]:
             prediction_df[column] = prediction_df[column].apply(json.dumps)
@@ -1075,6 +1256,12 @@ def ensure_parent_dir(path: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.legacy_prediction_file and not args.diagnose_predictions_csv:
+        args.diagnose_predictions_csv = args.legacy_prediction_file
+    if args.legacy_output_file and args.diagnostics_csv == DEFAULT_DIAGNOSTICS_CSV:
+        args.diagnostics_csv = args.legacy_output_file
+    if args.diagnostics_only and not args.diagnose_predictions_csv:
+        raise ValueError("--diagnostics_only requires --prediction_file or --diagnose-predictions-csv.")
     maybe_switch_default_output_paths(args)
 
     if not 0.0 <= args.similarity_threshold <= 1.0:
@@ -1093,7 +1280,11 @@ def main() -> None:
 
     ensure_parent_dir(args.diagnostics_csv)
     if args.diagnose_predictions_csv:
-        diagnostics_df = build_diagnostic_df_from_predictions_csv(args.diagnose_predictions_csv)
+        diagnostics_df = build_diagnostic_df_from_predictions_csv(
+            args.diagnose_predictions_csv,
+            args.similarity_threshold,
+            args.entailment_device,
+        )
         diagnostics_df.to_csv(args.diagnostics_csv, index=False)
         print(f"Saved per-example diagnostics to: {args.diagnostics_csv}")
         return
