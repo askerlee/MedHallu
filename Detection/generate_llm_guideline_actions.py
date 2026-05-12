@@ -16,9 +16,6 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from vllm import LLM, SamplingParams
 
 
-VLLM_ENABLE_V1_MULTIPROCESSING = "0"
-
-
 model_names = [
     #{"type": "hf", "model_name": "Qwen/Qwen3-4B-Instruct-2507"},
     #{"type": "hf", "model_name": "google/medgemma-1.5-4b-it"},
@@ -138,6 +135,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Optional timeout for each model subprocess. Use 0 to wait indefinitely.",
+    )
+    parser.add_argument(
+        "--hf-v1-multiprocessing",
+        choices=["auto", "0", "1"],
+        default="auto",
+        help="Override VLLM_ENABLE_V1_MULTIPROCESSING for local HF runs. 'auto' preserves the current environment.",
+    )
+    parser.add_argument(
+        "--hf-enforce-eager",
+        action="store_true",
+        help="Disable torch.compile during local HF generation. Useful if vLLM appears to stall during engine startup.",
+    )
+    parser.add_argument(
+        "--hf-max-num-seqs",
+        type=int,
+        default=0,
+        help="Optional vLLM max_num_seqs override for local HF generation. Use a small value such as 1 for debugging large models.",
     )
     return parser.parse_args()
 
@@ -540,20 +554,42 @@ def log_progress(message: str) -> None:
     print(message, flush=True)
 
 
-def evaluate_with_hf(model_name: str, prompts: List[List[Dict[str, str]]]) -> List[str]:
+def evaluate_with_hf(
+    model_name: str,
+    prompts: List[List[Dict[str, str]]],
+    hf_v1_multiprocessing: str,
+    hf_enforce_eager: bool,
+    hf_max_num_seqs: int,
+) -> List[str]:
     llm: Optional[LLM] = None
     tokenizer = None
     previous_vllm_multiprocessing = os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING")
     try:
         log_progress(f"[{model_name}] Initializing vLLM engine")
-        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = VLLM_ENABLE_V1_MULTIPROCESSING
+        if hf_v1_multiprocessing == "auto":
+            log_progress(
+                f"[{model_name}] Using VLLM_ENABLE_V1_MULTIPROCESSING="
+                f"{previous_vllm_multiprocessing if previous_vllm_multiprocessing is not None else 'default'}"
+            )
+        else:
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = hf_v1_multiprocessing
+            log_progress(
+                f"[{model_name}] Overriding VLLM_ENABLE_V1_MULTIPROCESSING={hf_v1_multiprocessing}"
+            )
+
+        llm_kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "tensor_parallel_size": 1,
+            "trust_remote_code": True,
+            "gpu_memory_utilization": 0.85,
+            "dtype": torch.bfloat16,
+            "enforce_eager": hf_enforce_eager,
+        }
+        if hf_max_num_seqs > 0:
+            llm_kwargs["max_num_seqs"] = hf_max_num_seqs
+
         llm = LLM(
-            model=model_name,
-            tensor_parallel_size=1,
-            trust_remote_code=True,
-            gpu_memory_utilization=0.85,
-            dtype=torch.bfloat16,
-            async_scheduling=False,
+            **llm_kwargs,
         )
         log_progress(f"[{model_name}] vLLM engine ready")
         tokenizer = llm.get_tokenizer()
@@ -661,13 +697,22 @@ def evaluate_model(
     openai_api_key: str,
     similarity_threshold: float,
     entailment_device: str,
+    hf_v1_multiprocessing: str,
+    hf_enforce_eager: bool,
+    hf_max_num_seqs: int,
 ) -> Dict[str, pd.DataFrame]:
     scorer: Optional[EntailmentScorer] = None
     try:
         log_progress(f"[{model_config['model_name']}] Building prompts")
         prompts = [create_prompt(row) for _, row in df.iterrows()]
         if model_config["type"] == "hf":
-            raw_outputs = evaluate_with_hf(model_config["model_name"], prompts)
+            raw_outputs = evaluate_with_hf(
+                model_config["model_name"],
+                prompts,
+                hf_v1_multiprocessing,
+                hf_enforce_eager,
+                hf_max_num_seqs,
+            )
         else:
             raw_outputs = evaluate_with_openai(model_config["model_name"], prompts, openai_api_key)
 
@@ -766,6 +811,9 @@ def run_model_subprocess(
     openai_api_key: str,
     similarity_threshold: float,
     entailment_device: str,
+    hf_v1_multiprocessing: str,
+    hf_enforce_eager: bool,
+    hf_max_num_seqs: int,
 ) -> None:
     try:
         log_progress(f"[{model_config['model_name']}] Loading evaluation dataset")
@@ -776,6 +824,9 @@ def run_model_subprocess(
             openai_api_key,
             similarity_threshold,
             entailment_device,
+            hf_v1_multiprocessing,
+            hf_enforce_eager,
+            hf_max_num_seqs,
         )
 
         predictions = outputs["predictions"]
@@ -840,6 +891,9 @@ def main() -> None:
                 openai_api_key,
                 args.similarity_threshold,
                 args.entailment_device,
+                args.hf_v1_multiprocessing,
+                args.hf_enforce_eager,
+                args.hf_max_num_seqs,
             ),
         )
         proc.start()
