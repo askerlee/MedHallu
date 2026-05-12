@@ -25,6 +25,12 @@ model_names = [
 ]
 
 
+DEFAULT_CASES_PATH = "guideline_policy/sample_vignette.json"
+DEFAULT_PREDICTIONS_CSV = "guideline_policy/generative_guideline_action_predictions.csv"
+DEFAULT_RESULTS_CSV = "guideline_policy/generative_guideline_action_results.csv"
+DEFAULT_DIAGNOSTICS_CSV = "guideline_policy/generative_guideline_action_diagnostics.csv"
+
+
 system_prompt = """
 You are an expert clinical guideline assistant.
 You will be given structured guideline rules and a patient vignette.
@@ -94,18 +100,28 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cases-path",
-        default="guideline_policy/sample_vignette.json",
+        default=DEFAULT_CASES_PATH,
         help="Path to a JSON or JSONL file containing guideline cases with reference recommended_actions.",
     )
     parser.add_argument(
         "--predictions-csv",
-        default="guideline_policy/generative_guideline_action_predictions.csv",
+        default=DEFAULT_PREDICTIONS_CSV,
         help="Where to save per-example generations and case-level action metrics.",
     )
     parser.add_argument(
         "--results-csv",
-        default="guideline_policy/generative_guideline_action_results.csv",
+        default=DEFAULT_RESULTS_CSV,
         help="Where to save summary metrics.",
+    )
+    parser.add_argument(
+        "--diagnostics-csv",
+        default=DEFAULT_DIAGNOSTICS_CSV,
+        help="Where to save per-example diagnostics explaining how each prediction differs from the reference.",
+    )
+    parser.add_argument(
+        "--diagnose-predictions-csv",
+        default="",
+        help="Optional existing predictions CSV to convert into a diagnostics CSV without rerunning model generation.",
     )
     parser.add_argument(
         "--similarity-threshold",
@@ -672,6 +688,124 @@ def truncate_numeric_values(df: pd.DataFrame, digits: int = 3) -> pd.DataFrame:
     return truncated_df
 
 
+def summarize_actions(actions: List[str]) -> str:
+    return " | ".join(str(action).strip() for action in actions if str(action).strip())
+
+
+def classify_prediction_issue(
+    raw_output: str,
+    generated_actions: List[str],
+    reference_actions: List[str],
+    match_result: Dict[str, Any],
+) -> Tuple[str, str]:
+    issues: List[str] = []
+
+    if match_result["exact_match"]:
+        return "correct", "Prediction exactly matched the reference action set."
+
+    raw_output = (raw_output or "").strip()
+    if not raw_output:
+        issues.append("empty_output")
+    elif not generated_actions:
+        issues.append("unparseable_or_empty_action_list")
+
+    if match_result["num_unmatched_reference_actions"] > 0:
+        issues.append("missed_reference_actions")
+    if match_result["num_unmatched_generated_actions"] > 0:
+        issues.append("hallucinated_actions")
+
+    if not issues:
+        issues.append("partial_semantic_mismatch")
+
+    explanation_parts: List[str] = []
+    if match_result["matched_pairs"]:
+        explanation_parts.append(
+            f"Matched {match_result['num_matched_actions']} of {len(reference_actions)} reference actions"
+        )
+    else:
+        explanation_parts.append("Matched 0 reference actions")
+
+    if match_result["unmatched_reference_actions"]:
+        explanation_parts.append(
+            "missed: " + summarize_actions(match_result["unmatched_reference_actions"])
+        )
+    if match_result["unmatched_generated_actions"]:
+        explanation_parts.append(
+            "extra: " + summarize_actions(match_result["unmatched_generated_actions"])
+        )
+    if "unparseable_or_empty_action_list" in issues and raw_output:
+        explanation_parts.append("model output did not yield a usable recommended_actions list")
+    if "empty_output" in issues:
+        explanation_parts.append("model returned no output")
+
+    return "+".join(issues), "; ".join(explanation_parts)
+
+
+def build_diagnostic_df(prediction_df: pd.DataFrame, match_results: List[Dict[str, Any]]) -> pd.DataFrame:
+    diagnostic_df = prediction_df.copy()
+
+    issue_details = [
+        classify_prediction_issue(raw_output, generated_actions, reference_actions, match_result)
+        for raw_output, generated_actions, reference_actions, match_result in zip(
+            diagnostic_df["raw_model_output"].tolist(),
+            diagnostic_df["generated_actions"].tolist(),
+            diagnostic_df["reference_actions"].tolist(),
+            match_results,
+        )
+    ]
+
+    diagnostic_df["diagnostic_label"] = [label for label, _ in issue_details]
+    diagnostic_df["diagnostic_summary"] = [summary for _, summary in issue_details]
+    diagnostic_df["matched_actions_text"] = [
+        summarize_actions(result["matched_generated_actions"]) for result in match_results
+    ]
+    diagnostic_df["missed_reference_actions_text"] = [
+        summarize_actions(result["unmatched_reference_actions"]) for result in match_results
+    ]
+    diagnostic_df["hallucinated_actions_text"] = [
+        summarize_actions(result["unmatched_generated_actions"]) for result in match_results
+    ]
+    diagnostic_df["generated_actions_text"] = diagnostic_df["generated_actions"].apply(summarize_actions)
+    diagnostic_df["reference_actions_text"] = diagnostic_df["reference_actions"].apply(summarize_actions)
+    diagnostic_df["matched_pairs_text"] = [
+        " | ".join(
+            f"{pair['generated_action']} => {pair['reference_action']} ({pair['score']:.3f})"
+            for pair in result["matched_pairs"]
+        )
+        for result in match_results
+    ]
+
+    diagnostic_columns = [
+        "model_name",
+        "guideline_id",
+        "guideline_title",
+        "case_id",
+        "case_kind",
+        "decision",
+        "diagnostic_label",
+        "diagnostic_summary",
+        "action_precision",
+        "action_recall",
+        "action_f1",
+        "average_match_score",
+        "num_generated_actions",
+        "num_reference_actions",
+        "num_matched_actions",
+        "num_unmatched_generated_actions",
+        "num_unmatched_reference_actions",
+        "reference_actions_text",
+        "generated_actions_text",
+        "matched_actions_text",
+        "missed_reference_actions_text",
+        "hallucinated_actions_text",
+        "matched_pairs_text",
+        "reference_rule_ids_text",
+        "patient_vignette",
+        "raw_model_output",
+    ]
+    return truncate_numeric_values(diagnostic_df[diagnostic_columns], digits=3)
+
+
 def summarize_slice(slice_df: pd.DataFrame, model_name: str, slice_name: str) -> Dict[str, Any]:
     exact_match_rate = float(np.mean(slice_df["exact_match"])) if len(slice_df) else None
     return {
@@ -689,6 +823,80 @@ def summarize_slice(slice_df: pd.DataFrame, model_name: str, slice_name: str) ->
         "mean_reference_actions": float(np.mean(slice_df["num_reference_actions"])) if len(slice_df) else None,
         "support": int(len(slice_df)),
     }
+
+
+def parse_json_cell(value: Any) -> Any:
+    if isinstance(value, (list, dict)):
+        return value
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return []
+
+
+def infer_adv_mode(cases_path: str, diagnose_predictions_csv: str) -> bool:
+    candidate_paths = [cases_path, diagnose_predictions_csv]
+    for path in candidate_paths:
+        if not path:
+            continue
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        if "_adv" in stem or stem.endswith("adv"):
+            return True
+    return False
+
+
+def maybe_switch_default_output_paths(args: argparse.Namespace) -> None:
+    if not infer_adv_mode(args.cases_path, args.diagnose_predictions_csv):
+        return
+
+    if args.predictions_csv == DEFAULT_PREDICTIONS_CSV:
+        args.predictions_csv = DEFAULT_PREDICTIONS_CSV.replace("_predictions.csv", "_adv_predictions.csv")
+    if args.results_csv == DEFAULT_RESULTS_CSV:
+        args.results_csv = DEFAULT_RESULTS_CSV.replace("_results.csv", "_adv_results.csv")
+    if args.diagnostics_csv == DEFAULT_DIAGNOSTICS_CSV:
+        args.diagnostics_csv = DEFAULT_DIAGNOSTICS_CSV.replace("_diagnostics.csv", "_adv_diagnostics.csv")
+
+
+def build_diagnostic_df_from_predictions_csv(predictions_csv: str) -> pd.DataFrame:
+    prediction_df = pd.read_csv(predictions_csv)
+
+    json_columns = [
+        "generated_actions",
+        "reference_actions",
+        "matched_pairs",
+        "matched_generated_actions",
+        "matched_reference_actions",
+        "unmatched_generated_actions",
+        "unmatched_reference_actions",
+        "reference_rule_ids",
+    ]
+    for column in json_columns:
+        if column in prediction_df.columns:
+            prediction_df[column] = prediction_df[column].apply(parse_json_cell)
+
+    match_results: List[Dict[str, Any]] = []
+    for _, row in prediction_df.iterrows():
+        matched_pairs = row.get("matched_pairs", [])
+        match_results.append(
+            {
+                "matched_pairs": matched_pairs if isinstance(matched_pairs, list) else [],
+                "matched_generated_actions": row.get("matched_generated_actions", []),
+                "matched_reference_actions": row.get("matched_reference_actions", []),
+                "unmatched_generated_actions": row.get("unmatched_generated_actions", []),
+                "unmatched_reference_actions": row.get("unmatched_reference_actions", []),
+                "num_matched_actions": int(row.get("num_matched_actions", 0)),
+                "num_unmatched_generated_actions": int(row.get("num_unmatched_generated_actions", 0)),
+                "num_unmatched_reference_actions": int(row.get("num_unmatched_reference_actions", 0)),
+                "exact_match": int(row.get("exact_match", 0)),
+            }
+        )
+
+    return build_diagnostic_df(prediction_df, match_results)
 
 
 def evaluate_model(
@@ -790,11 +998,13 @@ def evaluate_model(
                 summarize_slice(slice_df, model_config["model_name"], f"reference_actions_{action_count}")
             )
 
+        diagnostics_df = build_diagnostic_df(prediction_df, match_results)
         summary_df = truncate_numeric_values(pd.DataFrame(summary_rows), digits=3)
         log_progress(f"[{model_config['model_name']}] Evaluation finished")
         return {
             "predictions": prediction_df,
             "summary": summary_df,
+            "diagnostics": diagnostics_df,
         }
     finally:
         if scorer is not None:
@@ -808,6 +1018,7 @@ def run_model_subprocess(
     eval_df_path: str,
     predictions_csv: str,
     results_csv: str,
+    diagnostics_csv: str,
     openai_api_key: str,
     similarity_threshold: float,
     entailment_device: str,
@@ -831,6 +1042,7 @@ def run_model_subprocess(
 
         predictions = outputs["predictions"]
         summary = outputs["summary"]
+        diagnostics = outputs["diagnostics"]
         log_progress(f"[{model_config['model_name']}] Writing CSV outputs")
 
         if os.path.exists(predictions_csv):
@@ -842,6 +1054,11 @@ def run_model_subprocess(
             summary.to_csv(results_csv, mode="a", header=False, index=False)
         else:
             summary.to_csv(results_csv, mode="w", header=True, index=False)
+
+        if os.path.exists(diagnostics_csv):
+            diagnostics.to_csv(diagnostics_csv, mode="a", header=False, index=False)
+        else:
+            diagnostics.to_csv(diagnostics_csv, mode="w", header=True, index=False)
         log_progress(f"[{model_config['model_name']}] Subprocess work completed")
     except Exception as exc:
         print(f"Error evaluating {model_config['model_name']}: {exc}")
@@ -858,16 +1075,28 @@ def ensure_parent_dir(path: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    maybe_switch_default_output_paths(args)
 
     if not 0.0 <= args.similarity_threshold <= 1.0:
         raise ValueError("--similarity-threshold must be between 0 and 1.")
     if args.subprocess_timeout_seconds < 0.0:
         raise ValueError("--subprocess-timeout-seconds must be greater than or equal to 0.")
+    if args.diagnose_predictions_csv and not os.path.isfile(args.diagnose_predictions_csv):
+        raise FileNotFoundError(
+            f"Predictions CSV for diagnostics-only mode was not found: {args.diagnose_predictions_csv}"
+        )
 
     openai_api_key = args.openai_api_key.strip()
     requires_openai_key = any(model_config.get("type") == "openai" for model_config in model_names)
     if requires_openai_key and not openai_api_key:
         raise ValueError("This run includes OpenAI models. Please provide --openai-api-key.")
+
+    ensure_parent_dir(args.diagnostics_csv)
+    if args.diagnose_predictions_csv:
+        diagnostics_df = build_diagnostic_df_from_predictions_csv(args.diagnose_predictions_csv)
+        diagnostics_df.to_csv(args.diagnostics_csv, index=False)
+        print(f"Saved per-example diagnostics to: {args.diagnostics_csv}")
+        return
 
     eval_df = prepare_eval_df(args.cases_path.strip(), args.max_cases)
     ensure_parent_dir(args.predictions_csv)
@@ -888,6 +1117,7 @@ def main() -> None:
                 temp_eval_df_path,
                 args.predictions_csv,
                 args.results_csv,
+                args.diagnostics_csv,
                 openai_api_key,
                 args.similarity_threshold,
                 args.entailment_device,
@@ -918,6 +1148,7 @@ def main() -> None:
 
     print(f"Saved per-example predictions to: {args.predictions_csv}")
     print(f"Saved summary results to: {args.results_csv}")
+    print(f"Saved per-example diagnostics to: {args.diagnostics_csv}")
 
 
 if __name__ == "__main__":
