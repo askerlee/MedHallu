@@ -148,4 +148,21 @@ The evaluation provides:
 
 The detection script supports:
 - Hugging Face models via vLLM
-- OpenAI models (when configured with API key)
+- OpenAI-compatible hosted models, including OpenRouter
+
+For direct OpenAI models, use `type: "openai"`. For OpenRouter models, use `type: "openrouter"`; this always selects the OpenRouter endpoint and prefers `OPENROUTER_API_KEY`:
+
+```python
+{"type": "openrouter", "model_name": "provider/model-name"}
+```
+
+Provide the OpenRouter key through the environment:
+
+```bash
+export OPENROUTER_API_KEY="your-openrouter-key"
+python detect_llm_guideline_cases.py
+```
+
+When `OPENROUTER_API_KEY` is set, `type: "openrouter"` automatically uses `https://openrouter.ai/api/v1`. Set `OPENROUTER_BASE_URL` only to use a different compatible endpoint. The same `--openai-api-key` and `--openai-base-url` options are also available in `generate_llm_guideline_actions.py` and `detect_llm_medqa_case.py` for direct OpenAI or other compatible providers.
+
+OpenRouter requests run concurrently by default (up to 10 at a time). Use `--openrouter-max-concurrency 1` for sequential requests or set another limit to match your rate limits.

@@ -4,6 +4,7 @@ import gc
 import os
 import random
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -24,10 +25,11 @@ model_names = [
     #{'type': 'hf', 'model_name': 'Qwen/Qwen3.5-9B'},
     # {'type': 'hf', 'model_name': 'Qwen/Qwen3-30B-A3B-Instruct-2507'},
     # {'type': 'hf', 'model_name': 'deepseek-ai/DeepSeek-V3.2'},
-    {'type': 'hf', 'model_name': 'Qwen/Qwen3-4B-Instruct-2507'},
-    {'type': 'hf', 'model_name': 'google/medgemma-1.5-4b-it'},
-    {'type': 'hf', 'model_name': 'google/medgemma-27b-text-it'},
+    # {'type': 'hf', 'model_name': 'Qwen/Qwen3-4B-Instruct-2507'},
+    # {'type': 'hf', 'model_name': 'google/medgemma-1.5-4b-it'},
+    # {'type': 'hf', 'model_name': 'google/medgemma-27b-text-it'},
     # {'type': 'openai', 'model_name': 'gpt-5-mini'},
+    {'type': 'openrouter', 'model_name': 'qwen/qwen3.8-flash'},
 ]
 
 # ---------------------
@@ -260,7 +262,7 @@ def truncate_numeric_values(df, digits=3):
 # ---------------------
 # EVALUATION FUNCTION
 # ---------------------
-def run_evaluation(model_name, df, use_knowledge=False, openai_api_key=""):
+def run_evaluation(model_name, df, use_knowledge=False, openai_api_key="", openai_base_url="", openrouter_max_concurrency=10):
     chosen_answer_indices = []
     prompts = []
     answer_list = []   # ground-truth 0 or 1 for which answer is chosen
@@ -346,17 +348,51 @@ def run_evaluation(model_name, df, use_knowledge=False, openai_api_key=""):
         from openai import OpenAI
 
         if not openai_api_key:
-            raise ValueError("OpenAI API key is required for OpenAI models. Pass --openai-api-key.")
+            raise ValueError(
+                "An OpenAI-compatible API key is required for hosted models. "
+                "Pass --openai-api-key or set OPENAI_API_KEY/OPENROUTER_API_KEY."
+            )
 
-        client = OpenAI(api_key=openai_api_key)
-        progress_desc = f"OpenAI requests ({model_name['model_name']}, knowledge={use_knowledge})"
-        for chat_prompt in tqdm(prompts, desc=progress_desc, leave=False):
+        if model_name['type'] == 'openrouter':
+            hosted_api_key = os.environ.get("OPENROUTER_API_KEY", "").strip() or openai_api_key
+            hosted_base_url = (
+                os.environ.get("OPENROUTER_BASE_URL", "").strip()
+                or "https://openrouter.ai/api/v1"
+            )
+        else:
+            hosted_api_key = openai_api_key
+            hosted_base_url = openai_base_url
+
+        client_kwargs = {"api_key": hosted_api_key}
+        if hosted_base_url:
+            client_kwargs["base_url"] = hosted_base_url
+        client = OpenAI(**client_kwargs)
+        provider_name = "OpenRouter" if model_name['type'] == 'openrouter' else "OpenAI"
+        progress_desc = f"{provider_name} requests ({model_name['model_name']}, knowledge={use_knowledge})"
+
+        def request_completion(chat_prompt):
             response = client.chat.completions.create(model=model_name['model_name'],
             messages=chat_prompt,
             max_completion_tokens=4,
             n=1)
             content = response.choices[0].message.content.strip()
-            llm_answers.append(content)
+            return content
+
+        if model_name['type'] != 'openrouter' or openrouter_max_concurrency == 1:
+            llm_answers = [
+                request_completion(chat_prompt)
+                for chat_prompt in tqdm(prompts, desc=progress_desc, leave=False)
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=openrouter_max_concurrency) as executor:
+                llm_answers = list(
+                    tqdm(
+                        executor.map(request_completion, prompts),
+                        total=len(prompts),
+                        desc=progress_desc,
+                        leave=False,
+                    )
+                )
 
     result_df = calculate_metrics(answer_list, llm_answers, df, model_name, use_knowledge)
     return result_df
@@ -364,12 +400,12 @@ def run_evaluation(model_name, df, use_knowledge=False, openai_api_key=""):
 # ---------------------
 # FUNCTION TO RUN ONE EVALUATION IN A SUBPROCESS
 # ---------------------
-def evaluate_model_subprocess(model_name, use_knowledge, df_path, csv_path, openai_api_key):
+def evaluate_model_subprocess(model_name, use_knowledge, df_path, csv_path, openai_api_key, openai_base_url, openrouter_max_concurrency):
     try:
         # Each subprocess loads its own copy of the data
         df = pd.read_csv(df_path)
         print(f"Running {model_name['model_name']} with knowledge = {use_knowledge}")
-        result = run_evaluation(model_name, df, use_knowledge, openai_api_key)
+        result = run_evaluation(model_name, df, use_knowledge, openai_api_key, openai_base_url, openrouter_max_concurrency)
         result = truncate_numeric_values(result, digits=3)
         # Append results to CSV (create file with header if it does not exist)
         if os.path.exists(csv_path):
@@ -400,7 +436,18 @@ def main():
     parser.add_argument(
         "--openai-api-key",
         default="",
-        help="OpenAI API key (required when evaluating OpenAI models).",
+        help="OpenAI-compatible API key. If empty, OPENAI_API_KEY or OPENROUTER_API_KEY is used.",
+    )
+    parser.add_argument(
+        "--openai-base-url",
+        default="",
+        help="Optional OpenAI-compatible base URL. If empty, OPENAI_BASE_URL or OPENROUTER_BASE_URL is used.",
+    )
+    parser.add_argument(
+        "--openrouter-max-concurrency",
+        type=int,
+        default=10,
+        help="Maximum number of concurrent OpenRouter requests.",
     )
     args = parser.parse_args()
 
@@ -408,7 +455,23 @@ def main():
     hf_dataset_dir = args.hf_dataset_dir.strip() if args.hf_dataset_dir else ""
     prepared_csv_path = args.prepared_csv_path.strip()
     csv_path = args.csv_path.strip()
-    openai_api_key = args.openai_api_key.strip()
+    cli_api_key = args.openai_api_key.strip()
+    openai_env_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    openrouter_env_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    openai_api_key = cli_api_key or openai_env_key
+    openai_base_url = (
+        args.openai_base_url.strip()
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+        or (
+            "https://openrouter.ai/api/v1"
+            if openrouter_env_key and not cli_api_key and not openai_env_key
+            else ""
+        )
+    )
+
+    if args.openrouter_max_concurrency < 1:
+        raise ValueError("--openrouter-max-concurrency must be at least 1.")
 
     if not df_path and not hf_dataset_dir:
         raise ValueError("Provide either --df-path or --hf-dataset-dir.")
@@ -431,8 +494,14 @@ def main():
         raise ValueError("--csv-path cannot be empty.")
 
     requires_openai_key = any(model_name.get('type') == 'openai' for model_name in model_names)
+    requires_openrouter_key = any(model_name.get('type') == 'openrouter' for model_name in model_names)
     if requires_openai_key and not openai_api_key:
-        raise ValueError("This run includes OpenAI models. Please provide --openai-api-key.")
+        raise ValueError("This run includes OpenAI models. Provide --openai-api-key or set OPENAI_API_KEY.")
+    if requires_openrouter_key and not (cli_api_key or openrouter_env_key):
+        raise ValueError(
+            "This run includes OpenRouter models. "
+            "Provide --openai-api-key or set OPENROUTER_API_KEY."
+        )
 
     # For each model, run evaluation without knowledge and with knowledge sequentially in separate processes.
     ctx = multiprocessing.get_context("spawn")
@@ -440,7 +509,7 @@ def main():
         for use_knowledge in [False, True]:
             proc = ctx.Process(
                 target=evaluate_model_subprocess,
-                args=(model_name, use_knowledge, df_path, csv_path, openai_api_key)
+                args=(model_name, use_knowledge, df_path, csv_path, openai_api_key, openai_base_url, args.openrouter_max_concurrency)
             )
             proc.start()
             proc.join()  # Wait for the subprocess to finish before moving on

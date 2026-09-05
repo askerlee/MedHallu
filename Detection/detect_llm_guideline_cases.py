@@ -4,6 +4,7 @@ import gc
 import json
 import multiprocessing
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -20,6 +21,7 @@ model_names = [
     {"type": "hf", "model_name": "google/medgemma-1.5-4b-it"},
     {"type": "hf", "model_name": "google/medgemma-27b-text-it"},
     # {"type": "openai", "model_name": "gpt-5-mini"},
+    # {"type": "openrouter", "model_name": "provider/model-name"},
 ]
 
 
@@ -63,7 +65,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--openai-api-key",
         default="",
-        help="OpenAI API key, required only when OpenAI models are enabled.",
+        help="OpenAI-compatible API key, required only when OpenAI models are enabled. If empty, OPENAI_API_KEY or OPENROUTER_API_KEY is used.",
+    )
+    parser.add_argument(
+        "--openai-base-url",
+        default="",
+        help="Optional OpenAI-compatible base URL. If empty, OPENAI_BASE_URL or OPENROUTER_BASE_URL is used.",
+    )
+    parser.add_argument(
+        "--openrouter-max-concurrency",
+        type=int,
+        default=10,
+        help="Maximum number of concurrent OpenRouter requests.",
     )
     return parser.parse_args()
 
@@ -330,13 +343,27 @@ def evaluate_with_hf(model_name: str, prompts: List[List[Dict[str, str]]]) -> Li
     return responses
 
 
-def evaluate_with_openai(model_name: str, prompts: List[List[Dict[str, str]]], openai_api_key: str) -> List[str]:
+def evaluate_with_openai(
+    model_name: str,
+    prompts: List[List[Dict[str, str]]],
+    openai_api_key: str,
+    openai_base_url: str,
+    provider: str,
+    openrouter_max_concurrency: int,
+) -> List[str]:
     if not openai_api_key:
-        raise ValueError("OpenAI API key is required for OpenAI models. Pass --openai-api-key.")
+        raise ValueError(
+            "An OpenAI-compatible API key is required for hosted models. "
+            "Pass --openai-api-key or set OPENAI_API_KEY/OPENROUTER_API_KEY."
+        )
 
-    client = OpenAI(api_key=openai_api_key)
-    responses: List[str] = []
-    for prompt in tqdm(prompts, desc=f"OpenAI requests ({model_name})", leave=False):
+    client_kwargs: Dict[str, Any] = {"api_key": openai_api_key}
+    if openai_base_url:
+        client_kwargs["base_url"] = openai_base_url
+    client = OpenAI(**client_kwargs)
+    provider_name = "OpenRouter" if provider == "openrouter" else "OpenAI"
+
+    def request_completion(prompt: List[Dict[str, str]]) -> str:
         response = client.chat.completions.create(
             model=model_name,
             messages=prompt,
@@ -344,8 +371,23 @@ def evaluate_with_openai(model_name: str, prompts: List[List[Dict[str, str]]], o
             n=1,
         )
         content = response.choices[0].message.content
-        responses.append(content.strip() if isinstance(content, str) else str(content))
-    return responses
+        return content.strip() if isinstance(content, str) else str(content)
+
+    if provider != "openrouter" or openrouter_max_concurrency == 1:
+        return [
+            request_completion(prompt)
+            for prompt in tqdm(prompts, desc=f"{provider_name} requests ({model_name})", leave=False)
+        ]
+
+    with ThreadPoolExecutor(max_workers=openrouter_max_concurrency) as executor:
+        return list(
+            tqdm(
+                executor.map(request_completion, prompts),
+                total=len(prompts),
+                desc=f"{provider_name} requests ({model_name})",
+                leave=False,
+            )
+        )
 
 
 def calculate_binary_metrics(true_labels: List[int], predicted_labels: List[int]) -> Dict[str, Optional[float]]:
@@ -388,12 +430,34 @@ def truncate_numeric_values(df: pd.DataFrame, digits: int = 3) -> pd.DataFrame:
     return truncated_df
 
 
-def evaluate_model(model_config: Dict[str, str], df: pd.DataFrame, openai_api_key: str) -> Dict[str, pd.DataFrame]:
+def evaluate_model(
+    model_config: Dict[str, str],
+    df: pd.DataFrame,
+    openai_api_key: str,
+    openai_base_url: str,
+    openrouter_max_concurrency: int,
+) -> Dict[str, pd.DataFrame]:
     prompts = [create_prompt(row) for _, row in df.iterrows()]
     if model_config["type"] == "hf":
         raw_predictions = evaluate_with_hf(model_config["model_name"], prompts)
     else:
-        raw_predictions = evaluate_with_openai(model_config["model_name"], prompts, openai_api_key)
+        if model_config["type"] == "openrouter":
+            hosted_api_key = os.environ.get("OPENROUTER_API_KEY", "").strip() or openai_api_key
+            hosted_base_url = (
+                os.environ.get("OPENROUTER_BASE_URL", "").strip()
+                or "https://openrouter.ai/api/v1"
+            )
+        else:
+            hosted_api_key = openai_api_key
+            hosted_base_url = openai_base_url
+        raw_predictions = evaluate_with_openai(
+            model_config["model_name"],
+            prompts,
+            hosted_api_key,
+            hosted_base_url,
+            model_config["type"],
+            openrouter_max_concurrency,
+        )
 
     prediction_df = df.copy()
     prediction_df["model_name"] = model_config["model_name"]
@@ -460,10 +524,18 @@ def run_model_subprocess(
     predictions_csv: str,
     results_csv: str,
     openai_api_key: str,
+    openai_base_url: str,
+    openrouter_max_concurrency: int,
 ) -> None:
     try:
         df = pd.read_json(eval_df_path, orient="records")
-        outputs = evaluate_model(model_config, df, openai_api_key)
+        outputs = evaluate_model(
+            model_config,
+            df,
+            openai_api_key,
+            openai_base_url,
+            openrouter_max_concurrency,
+        )
 
         predictions = outputs["predictions"]
         summary = outputs["summary"]
@@ -492,10 +564,32 @@ def ensure_parent_dir(path: str) -> None:
 def main() -> None:
     args = parse_args()
 
-    openai_api_key = args.openai_api_key.strip()
+    if args.openrouter_max_concurrency < 1:
+        raise ValueError("--openrouter-max-concurrency must be at least 1.")
+
+    cli_api_key = args.openai_api_key.strip()
+    openai_env_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    openrouter_env_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    openai_api_key = cli_api_key or openai_env_key
+    openai_base_url = (
+        args.openai_base_url.strip()
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+        or (
+            "https://openrouter.ai/api/v1"
+            if openrouter_env_key and not cli_api_key and not openai_env_key
+            else ""
+        )
+    )
     requires_openai_key = any(model_config.get("type") == "openai" for model_config in model_names)
+    requires_openrouter_key = any(model_config.get("type") == "openrouter" for model_config in model_names)
     if requires_openai_key and not openai_api_key:
-        raise ValueError("This run includes OpenAI models. Please provide --openai-api-key.")
+        raise ValueError("This run includes OpenAI models. Provide --openai-api-key or set OPENAI_API_KEY.")
+    if requires_openrouter_key and not (cli_api_key or openrouter_env_key):
+        raise ValueError(
+            "This run includes OpenRouter models. "
+            "Provide --openai-api-key or set OPENROUTER_API_KEY."
+        )
 
     groundtruth_path = args.groundtruth_path.strip()
     adversarial_path = args.adversarial_path.strip()
@@ -527,6 +621,8 @@ def main() -> None:
                 args.predictions_csv,
                 args.results_csv,
                 openai_api_key,
+                openai_base_url,
+                args.openrouter_max_concurrency,
             ),
         )
         proc.start()
