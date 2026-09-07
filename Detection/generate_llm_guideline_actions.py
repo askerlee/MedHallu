@@ -33,6 +33,9 @@ DEFAULT_PREDICTIONS_CSV = "guideline_policy/generative_guideline_action_predicti
 DEFAULT_RESULTS_CSV = "guideline_policy/generative_guideline_action_results.csv"
 DEFAULT_DIAGNOSTICS_CSV = "guideline_policy/generative_guideline_action_diagnostics.csv"
 DEFAULT_MAX_COMPLETION_TOKENS = 256
+# HF thinking tokens budget for reasoning before generating the final completion 
+# when only --hf-enable-thinking is set.
+DEFAULT_HF_THINKING_TOKEN_BUDGET = 1000
 # Extra completion-token budget reserved for reasoning when only --reasoning-effort is set (mirrors mermed/compare_logprobs.py).
 _REASONING_EFFORT_TOKEN_ALLOWANCE = 1000
 
@@ -208,6 +211,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="vLLM tensor-parallel GPU count. Use 0 to automatically use all visible CUDA GPUs.",
+    )
+    parser.add_argument(
+        "--hf-max-model-len",
+        type=int,
+        default=0,
+        help="vLLM maximum context length. Use 0 for the model default; Gemma 4 defaults to 16384 to conserve KV cache.",
+    )
+    parser.add_argument(
+        "--hf-enable-thinking",
+        action="store_true",
+        help="Enable reasoning mode for local Hugging Face models whose chat template supports enable_thinking.",
     )
     parser.add_argument(
         "--hf-cpu-offload-gb",
@@ -518,8 +532,24 @@ def extract_json_payload(text: str) -> Optional[Any]:
     return None
 
 
+def extract_final_channel(text: str) -> str:
+    final_channel_marker = "<|channel>final"
+    final_channel_start = text.rfind(final_channel_marker)
+    if final_channel_start != -1:
+        return text[final_channel_start + len(final_channel_marker) :].lstrip("\n")
+
+    thought_channel_marker = "<|channel>thought"
+    if thought_channel_marker in text:
+        _, thought_channel_end, final_text = text.rpartition("<channel|>")
+        return final_text.lstrip("\n") if thought_channel_end else ""
+    if text.lstrip().startswith("thought\n"):
+        return ""
+    return text
+
+
 def parse_generated_actions(raw_text: str) -> List[str]:
-    payload = extract_json_payload(raw_text)
+    final_text = extract_final_channel(raw_text)
+    payload = extract_json_payload(final_text)
     actions: List[str] = []
 
     if isinstance(payload, dict):
@@ -538,7 +568,7 @@ def parse_generated_actions(raw_text: str) -> List[str]:
         return deduplicate_actions(actions)
 
     cleaned_lines: List[str] = []
-    for raw_line in (raw_text or "").splitlines():
+    for raw_line in final_text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -727,6 +757,53 @@ def resolve_hf_tensor_parallel_size(configured_size: int) -> int:
     return max(torch.cuda.device_count(), 1)
 
 
+def resolve_hf_max_model_len(model_name: str, configured_max_model_len: int) -> int:
+    if configured_max_model_len > 0:
+        return configured_max_model_len
+    return 16384 if model_name.lower().startswith("google/gemma-4-") else 0
+
+
+def log_prompt_length_summary(
+    model_name: str,
+    tokenizer: Any,
+    formatted_prompts: List[str],
+    max_model_len: int,
+    max_completion_tokens: int,
+) -> None:
+    if not formatted_prompts:
+        return
+
+    prompt_token_counts = [
+        len(tokenizer.encode(prompt, add_special_tokens=False))
+        for prompt in formatted_prompts
+    ]
+    longest_prompt_index, longest_prompt_tokens = max(
+        enumerate(prompt_token_counts),
+        key=lambda item: item[1],
+    )
+    if max_model_len <= 0:
+        log_progress(
+            f"[{model_name}] Longest formatted prompt: index {longest_prompt_index}, "
+            f"{longest_prompt_tokens} tokens; model context limit was not overridden"
+        )
+        return
+
+    required_tokens = longest_prompt_tokens + max_completion_tokens
+    remaining_tokens = max_model_len - required_tokens
+    if remaining_tokens >= 0:
+        log_progress(
+            f"[{model_name}] Longest formatted prompt: index {longest_prompt_index}, "
+            f"{longest_prompt_tokens} tokens; {remaining_tokens} tokens remain after reserving "
+            f"{max_completion_tokens} completion tokens within the {max_model_len}-token context"
+        )
+    else:
+        log_progress(
+            f"[{model_name}] WARNING: longest formatted prompt at index {longest_prompt_index} "
+            f"requires {required_tokens} tokens including {max_completion_tokens} completion tokens, "
+            f"which exceeds the {max_model_len}-token context by {-remaining_tokens} tokens"
+        )
+
+
 def resolve_hf_cpu_offload_gb(
     model_name: str,
     configured_offload_gb: Optional[float],
@@ -744,6 +821,8 @@ def evaluate_with_hf(
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
     hf_tensor_parallel_size: int,
+    hf_max_model_len: int,
+    hf_enable_thinking: bool,
     hf_cpu_offload_gb: Optional[float],
 ) -> List[str]:
     llm: Optional[LLM] = None
@@ -775,8 +854,14 @@ def evaluate_with_hf(
         hf_overrides = resolve_hf_overrides(model_name)
         if hf_overrides is not None:
             llm_kwargs["hf_overrides"] = hf_overrides
+        if hf_enable_thinking and model_name.lower().startswith("google/gemma-4-"):
+            llm_kwargs["reasoning_parser"] = "gemma4"
         if hf_max_num_seqs > 0:
             llm_kwargs["max_num_seqs"] = hf_max_num_seqs
+        max_model_len = resolve_hf_max_model_len(model_name, hf_max_model_len)
+        if max_model_len > 0:
+            llm_kwargs["max_model_len"] = max_model_len
+            log_progress(f"[{model_name}] Limiting model context to {max_model_len} tokens")
         cpu_offload_gb = resolve_hf_cpu_offload_gb(
             model_name,
             hf_cpu_offload_gb,
@@ -791,6 +876,8 @@ def evaluate_with_hf(
         )
         log_progress(f"[{model_name}] vLLM engine ready")
         tokenizer = llm.get_tokenizer()
+        if hf_enable_thinking:
+            log_progress(f"[{model_name}] Enabling chat-template reasoning mode")
 
         stop_tok_id: List[int] = []
         if tokenizer.eos_token_id is not None:
@@ -803,25 +890,48 @@ def evaluate_with_hf(
             except Exception:
                 pass
 
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            top_p=1.0,
-            max_tokens=256,
-            stop_token_ids=stop_tok_id,
-        )
+        max_tokens = DEFAULT_MAX_COMPLETION_TOKENS
+        sampling_params_kwargs: Dict[str, Any] = {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_tokens": max_tokens,
+            "stop_token_ids": stop_tok_id,
+        }
+        if hf_enable_thinking:
+            sampling_params_kwargs["thinking_token_budget"] = DEFAULT_HF_THINKING_TOKEN_BUDGET
+            sampling_params_kwargs["max_tokens"] += DEFAULT_HF_THINKING_TOKEN_BUDGET
+        sampling_params = SamplingParams(**sampling_params_kwargs)
 
-        formatted_prompts: List[str] = []
-        for prompt in prompts:
-            formatted_prompts.append(
-                tokenizer.apply_chat_template(
-                    prompt,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
+        formatted_prompts = [
+            tokenizer.apply_chat_template(
+                prompt,
+                add_generation_prompt=True,
+                tokenize=False,
+                enable_thinking=hf_enable_thinking,
             )
-
+            for prompt in prompts
+        ]
+        log_prompt_length_summary(
+            model_name,
+            tokenizer,
+            formatted_prompts,
+            max_model_len,
+            sampling_params.max_tokens,
+        )
         log_progress(f"[{model_name}] Starting generation for {len(formatted_prompts)} prompts")
-        outputs = llm.generate(formatted_prompts, sampling_params)
+        if hf_enable_thinking:
+            log_progress(
+                f"[{model_name}] Reserving up to {DEFAULT_HF_THINKING_TOKEN_BUDGET} thinking tokens "
+                f"and {DEFAULT_MAX_COMPLETION_TOKENS} final-answer tokens"
+            )
+            outputs = llm.chat(
+                prompts,
+                sampling_params,
+                use_tqdm=True,
+                chat_template_kwargs={"enable_thinking": True},
+            )
+        else:
+            outputs = llm.generate(formatted_prompts, sampling_params)
         log_progress(f"[{model_name}] Generation finished")
         return [output.outputs[0].text.strip() for output in outputs]
     finally:
@@ -1262,6 +1372,8 @@ def evaluate_model(
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
     hf_tensor_parallel_size: int,
+    hf_max_model_len: int,
+    hf_enable_thinking: bool,
     hf_cpu_offload_gb: Optional[float],
     openrouter_max_concurrency: int,
     max_reasoning_tokens: Optional[int],
@@ -1279,6 +1391,8 @@ def evaluate_model(
                 hf_enforce_eager,
                 hf_max_num_seqs,
                 hf_tensor_parallel_size,
+                hf_max_model_len,
+                hf_enable_thinking,
                 hf_cpu_offload_gb,
             )
         else:
@@ -1428,6 +1542,8 @@ def run_model_subprocess(
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
     hf_tensor_parallel_size: int,
+    hf_max_model_len: int,
+    hf_enable_thinking: bool,
     hf_cpu_offload_gb: Optional[float],
     openrouter_max_concurrency: int,
     max_reasoning_tokens: Optional[int],
@@ -1447,6 +1563,8 @@ def run_model_subprocess(
             hf_enforce_eager,
             hf_max_num_seqs,
             hf_tensor_parallel_size,
+            hf_max_model_len,
+            hf_enable_thinking,
             hf_cpu_offload_gb,
             openrouter_max_concurrency,
             max_reasoning_tokens,
@@ -1507,6 +1625,8 @@ def main() -> None:
         raise ValueError("--openrouter-max-concurrency must be at least 1.")
     if args.hf_tensor_parallel_size < 0:
         raise ValueError("--hf-tensor-parallel-size must be greater than or equal to 0.")
+    if args.hf_max_model_len < 0:
+        raise ValueError("--hf-max-model-len must be greater than or equal to 0.")
     if args.hf_cpu_offload_gb is not None and args.hf_cpu_offload_gb < 0:
         raise ValueError("--hf-cpu-offload-gb must be greater than or equal to 0.")
     if args.diagnose_predictions_csv and not os.path.isfile(args.diagnose_predictions_csv):
@@ -1586,6 +1706,8 @@ def main() -> None:
                 args.hf_enforce_eager,
                 args.hf_max_num_seqs,
                 args.hf_tensor_parallel_size,
+                args.hf_max_model_len,
+                args.hf_enable_thinking,
                 args.hf_cpu_offload_gb,
                 args.openrouter_max_concurrency,
                 args.max_reasoning_tokens,
