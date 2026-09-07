@@ -203,6 +203,18 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Optional vLLM max_num_seqs override for local HF generation. Use a small value such as 1 for debugging large models.",
     )
+    parser.add_argument(
+        "--hf-tensor-parallel-size",
+        type=int,
+        default=0,
+        help="vLLM tensor-parallel GPU count. Use 0 to automatically use all visible CUDA GPUs.",
+    )
+    parser.add_argument(
+        "--hf-cpu-offload-gb",
+        type=float,
+        default=None,
+        help="vLLM CPU weight offload in GiB. Defaults to 4 GiB for single-GPU Gemma 4 and 0 otherwise.",
+    )
     reasoning_group = parser.add_mutually_exclusive_group()
     reasoning_group.add_argument(
         "--max-reasoning-tokens",
@@ -709,12 +721,30 @@ def resolve_hf_overrides(model_name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def resolve_hf_tensor_parallel_size(configured_size: int) -> int:
+    if configured_size > 0:
+        return configured_size
+    return max(torch.cuda.device_count(), 1)
+
+
+def resolve_hf_cpu_offload_gb(
+    model_name: str,
+    configured_offload_gb: Optional[float],
+    tensor_parallel_size: int,
+) -> float:
+    if configured_offload_gb is not None:
+        return configured_offload_gb
+    return 4.0 if model_name.lower().startswith("google/gemma-4-") and tensor_parallel_size == 1 else 0.0
+
+
 def evaluate_with_hf(
     model_name: str,
     prompts: List[List[Dict[str, str]]],
     hf_v1_multiprocessing: str,
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
+    hf_tensor_parallel_size: int,
+    hf_cpu_offload_gb: Optional[float],
 ) -> List[str]:
     llm: Optional[LLM] = None
     tokenizer = None
@@ -732,9 +762,11 @@ def evaluate_with_hf(
                 f"[{model_name}] Overriding VLLM_ENABLE_V1_MULTIPROCESSING={hf_v1_multiprocessing}"
             )
 
+        tensor_parallel_size = resolve_hf_tensor_parallel_size(hf_tensor_parallel_size)
+        log_progress(f"[{model_name}] Using tensor parallelism across {tensor_parallel_size} GPU(s)")
         llm_kwargs: Dict[str, Any] = {
             "model": model_name,
-            "tensor_parallel_size": 1,
+            "tensor_parallel_size": tensor_parallel_size,
             "trust_remote_code": True,
             "gpu_memory_utilization": 0.85,
             "dtype": torch.bfloat16,
@@ -745,6 +777,14 @@ def evaluate_with_hf(
             llm_kwargs["hf_overrides"] = hf_overrides
         if hf_max_num_seqs > 0:
             llm_kwargs["max_num_seqs"] = hf_max_num_seqs
+        cpu_offload_gb = resolve_hf_cpu_offload_gb(
+            model_name,
+            hf_cpu_offload_gb,
+            tensor_parallel_size,
+        )
+        if cpu_offload_gb > 0:
+            llm_kwargs["cpu_offload_gb"] = cpu_offload_gb
+            log_progress(f"[{model_name}] Offloading {cpu_offload_gb:g} GiB of model weights to CPU")
 
         llm = LLM(
             **llm_kwargs,
@@ -1221,6 +1261,8 @@ def evaluate_model(
     hf_v1_multiprocessing: str,
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
+    hf_tensor_parallel_size: int,
+    hf_cpu_offload_gb: Optional[float],
     openrouter_max_concurrency: int,
     max_reasoning_tokens: Optional[int],
     reasoning_effort: Optional[str],
@@ -1236,6 +1278,8 @@ def evaluate_model(
                 hf_v1_multiprocessing,
                 hf_enforce_eager,
                 hf_max_num_seqs,
+                hf_tensor_parallel_size,
+                hf_cpu_offload_gb,
             )
         else:
             if model_config["type"] == "openrouter":
@@ -1383,6 +1427,8 @@ def run_model_subprocess(
     hf_v1_multiprocessing: str,
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
+    hf_tensor_parallel_size: int,
+    hf_cpu_offload_gb: Optional[float],
     openrouter_max_concurrency: int,
     max_reasoning_tokens: Optional[int],
     reasoning_effort: Optional[str],
@@ -1400,6 +1446,8 @@ def run_model_subprocess(
             hf_v1_multiprocessing,
             hf_enforce_eager,
             hf_max_num_seqs,
+            hf_tensor_parallel_size,
+            hf_cpu_offload_gb,
             openrouter_max_concurrency,
             max_reasoning_tokens,
             reasoning_effort,
@@ -1457,6 +1505,10 @@ def main() -> None:
         raise ValueError("--subprocess-timeout-seconds must be greater than or equal to 0.")
     if args.openrouter_max_concurrency < 1:
         raise ValueError("--openrouter-max-concurrency must be at least 1.")
+    if args.hf_tensor_parallel_size < 0:
+        raise ValueError("--hf-tensor-parallel-size must be greater than or equal to 0.")
+    if args.hf_cpu_offload_gb is not None and args.hf_cpu_offload_gb < 0:
+        raise ValueError("--hf-cpu-offload-gb must be greater than or equal to 0.")
     if args.diagnose_predictions_csv and not os.path.isfile(args.diagnose_predictions_csv):
         raise FileNotFoundError(
             f"Predictions CSV for diagnostics-only mode was not found: {args.diagnose_predictions_csv}"
@@ -1533,6 +1585,8 @@ def main() -> None:
                 args.hf_v1_multiprocessing,
                 args.hf_enforce_eager,
                 args.hf_max_num_seqs,
+                args.hf_tensor_parallel_size,
+                args.hf_cpu_offload_gb,
                 args.openrouter_max_concurrency,
                 args.max_reasoning_tokens,
                 args.reasoning_effort,
