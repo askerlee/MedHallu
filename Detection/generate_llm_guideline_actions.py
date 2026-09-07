@@ -699,6 +699,16 @@ def log_progress(message: str) -> None:
     print(message, flush=True)
 
 
+def resolve_hf_overrides(model_name: str) -> Optional[Dict[str, Any]]:
+    if model_name.lower().startswith("google/gemma-4-"):
+        return {
+            "text_config": {
+                "allow_global_per_layer_attribute_access": True,
+            }
+        }
+    return None
+
+
 def evaluate_with_hf(
     model_name: str,
     prompts: List[List[Dict[str, str]]],
@@ -730,6 +740,9 @@ def evaluate_with_hf(
             "dtype": torch.bfloat16,
             "enforce_eager": hf_enforce_eager,
         }
+        hf_overrides = resolve_hf_overrides(model_name)
+        if hf_overrides is not None:
+            llm_kwargs["hf_overrides"] = hf_overrides
         if hf_max_num_seqs > 0:
             llm_kwargs["max_num_seqs"] = hf_max_num_seqs
 
@@ -1414,6 +1427,7 @@ def run_model_subprocess(
         log_progress(f"[{model_config['model_name']}] Subprocess work completed")
     except Exception as exc:
         print(f"Error evaluating {model_config['model_name']}: {exc}")
+        raise
     finally:
         shutdown_torch_distributed()
         clear_gpu_memory()
@@ -1537,10 +1551,14 @@ def main() -> None:
             proc.join()
         exit_code = proc.exitcode
         proc.close()
-        if exit_code not in {0, None}:
-            print(f"Subprocess for {model_config['model_name']} exited with code {exit_code}")
-        print(f"Completed {model_config['model_name']}")
-        saved_output_paths.append((predictions_csv, results_csv, diagnostics_csv))
+        if exit_code in {0, None}:
+            print(f"Completed {model_config['model_name']}")
+            saved_output_paths.append((predictions_csv, results_csv, diagnostics_csv))
+        else:
+            print(
+                f"Failed {model_config['model_name']} (subprocess exit code {exit_code}); "
+                "no output files were saved for this model."
+            )
 
     if os.path.exists(temp_eval_df_path):
         os.remove(temp_eval_df_path)
