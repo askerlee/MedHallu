@@ -1,0 +1,12 @@
+model_name,slice_name,case_accuracy,exact_match_rate,mean_action_precision,mean_action_recall,mean_action_f1,mean_match_score,hallucination_free_rate,full_recall_rate,mean_generated_actions,mean_reference_actions,support
+qwen/qwen3.8-2.4t-a95b,overall,0.003,0.003,0.035,0.219,0.04,0.072,0.003,0.194,1.412,2.184,298
+qwen/qwen3.8-2.4t-a95b,challenging_example,0.0,0.0,0.034,0.307,0.041,0.079,0.0,0.277,1.51,1.863,198
+qwen/qwen3.8-2.4t-a95b,source_case,0.01,0.01,0.035,0.044,0.038,0.059,0.01,0.03,1.22,2.82,100
+qwen/qwen3.8-2.4t-a95b,reference_actions_0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,1.183,0.0,49
+qwen/qwen3.8-2.4t-a95b,reference_actions_1,0.016,0.016,0.03,0.065,0.036,0.065,0.016,0.065,1.262,1.0,61
+qwen/qwen3.8-2.4t-a95b,reference_actions_2,0.0,0.0,0.016,0.039,0.022,0.045,0.0,0.026,1.263,2.0,76
+qwen/qwen3.8-2.4t-a95b,reference_actions_3,0.0,0.0,0.033,0.042,0.036,0.066,0.0,0.0,1.309,3.0,55
+qwen/qwen3.8-2.4t-a95b,reference_actions_4,0.0,0.0,0.099,0.138,0.114,0.211,0.0,0.074,2.037,4.0,27
+qwen/qwen3.8-2.4t-a95b,reference_actions_5,0.0,0.0,0.143,0.166,0.152,0.216,0.0,0.055,2.111,5.0,18
+qwen/qwen3.8-2.4t-a95b,reference_actions_6,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.0,6.0,9
+qwen/qwen3.8-2.4t-a95b,reference_actions_7,0.0,0.0,0.095,0.095,0.095,0.326,0.0,0.0,5.333,7.0,3

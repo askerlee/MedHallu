@@ -22,7 +22,7 @@ model_names = [
     #{"type": "hf", "model_name": "google/medgemma-1.5-4b-it"},
     #{"type": "hf", "model_name": "google/medgemma-27b-text-it"},
     # {"type": "hf", "model_name": "Qwen/Qwen3.6-35B-A3B"},
-    {'type': 'openrouter', 'model_name': 'qwen/qwen3.8-flash'},
+    # {'type': 'openrouter', 'model_name': 'qwen/qwen3.8-flash'},
     # {"type": "openai", "model_name": "gpt-5-mini"},
     # {"type": "openrouter", "model_name": "provider/model-name"},
 ]
@@ -32,6 +32,9 @@ DEFAULT_CASES_PATH = "guideline_policy/sample_vignette.json"
 DEFAULT_PREDICTIONS_CSV = "guideline_policy/generative_guideline_action_predictions.csv"
 DEFAULT_RESULTS_CSV = "guideline_policy/generative_guideline_action_results.csv"
 DEFAULT_DIAGNOSTICS_CSV = "guideline_policy/generative_guideline_action_diagnostics.csv"
+DEFAULT_MAX_COMPLETION_TOKENS = 256
+# Extra completion-token budget reserved for reasoning when only --reasoning-effort is set (mirrors mermed/compare_logprobs.py).
+_REASONING_EFFORT_TOKEN_ALLOWANCE = 1000
 
 
 system_prompt = """
@@ -200,7 +203,46 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Optional vLLM max_num_seqs override for local HF generation. Use a small value such as 1 for debugging large models.",
     )
+    reasoning_group = parser.add_mutually_exclusive_group()
+    reasoning_group.add_argument(
+        "--max-reasoning-tokens",
+        type=int,
+        default=None,
+        help="Cap OpenRouter reasoning tokens (added on top of the completion token budget). Support varies by model.",
+    )
+    reasoning_group.add_argument(
+        "--reasoning-effort",
+        choices=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        default=None,
+        help="OpenRouter reasoning effort; overrides the default numeric cap. Ignored for non-OpenRouter models.",
+    )
+    parser.add_argument(
+        "--model",
+        dest="models",
+        action="append",
+        default=None,
+        help=(
+            "Override the hardcoded model_names list. Format: <type>:<model_name>, e.g. "
+            "openrouter:qwen/qwen3.8-flash. Pass multiple times to evaluate several models. "
+            "Valid types: hf, openai, openrouter."
+        ),
+    )
     return parser.parse_args()
+
+
+def parse_model_overrides(model_specs: List[str]) -> List[Dict[str, str]]:
+    valid_types = {"hf", "openai", "openrouter"}
+    parsed_models: List[Dict[str, str]] = []
+    for model_spec in model_specs:
+        model_type, separator, model_name = model_spec.partition(":")
+        if not separator or not model_type or not model_name:
+            raise ValueError(
+                f"Invalid --model value '{model_spec}'. Expected format: <type>:<model_name>."
+            )
+        if model_type not in valid_types:
+            raise ValueError(f"Invalid model type '{model_type}' in --model '{model_spec}'. Valid types: {sorted(valid_types)}.")
+        parsed_models.append({"type": model_type, "model_name": model_name})
+    return parsed_models
 
 
 def load_structured_records(path: str) -> List[Dict[str, Any]]:
@@ -594,6 +636,8 @@ def match_action_lists(
         "unmatched_generated_actions": [generated_actions[index] for index in sorted(remaining_generated)],
         "unmatched_reference_actions": [reference_actions[index] for index in sorted(remaining_reference)],
         "num_matched_actions": num_matched_actions,
+        "num_unmatched_generated_actions": len(remaining_generated),
+        "num_unmatched_reference_actions": len(remaining_reference),
         "action_precision": action_precision,
         "action_recall": action_recall,
         "action_f1": action_f1,
@@ -738,6 +782,28 @@ def evaluate_with_hf(
         del llm
 
 
+def resolve_reasoning_config(
+    max_reasoning_tokens: Optional[int],
+    reasoning_effort: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if max_reasoning_tokens is not None:
+        return {"max_tokens": max_reasoning_tokens}
+    if reasoning_effort is not None:
+        return {"effort": reasoning_effort}
+    return None
+
+
+def resolve_max_completion_tokens(
+    base_max_completion_tokens: int,
+    max_reasoning_tokens: Optional[int],
+    reasoning_effort: Optional[str],
+) -> int:
+    reasoning_allowance = max_reasoning_tokens or (
+        _REASONING_EFFORT_TOKEN_ALLOWANCE if reasoning_effort not in (None, "none") else 0
+    )
+    return base_max_completion_tokens + reasoning_allowance
+
+
 def evaluate_with_openai(
     model_name: str,
     prompts: List[List[Dict[str, str]]],
@@ -745,6 +811,8 @@ def evaluate_with_openai(
     openai_base_url: str,
     provider: str,
     openrouter_max_concurrency: int,
+    max_reasoning_tokens: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> List[str]:
     if not openai_api_key:
         raise ValueError(
@@ -758,13 +826,25 @@ def evaluate_with_openai(
     client = OpenAI(**client_kwargs)
     provider_name = "OpenRouter" if provider == "openrouter" else "OpenAI"
 
+    reasoning_config = (
+        resolve_reasoning_config(max_reasoning_tokens, reasoning_effort) if provider == "openrouter" else None
+    )
+    max_completion_tokens = (
+        resolve_max_completion_tokens(DEFAULT_MAX_COMPLETION_TOKENS, max_reasoning_tokens, reasoning_effort)
+        if provider == "openrouter"
+        else DEFAULT_MAX_COMPLETION_TOKENS
+    )
+
     def request_completion(prompt: List[Dict[str, str]]) -> str:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=prompt,
-            max_completion_tokens=256,
-            n=1,
-        )
+        create_kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "messages": prompt,
+            "max_completion_tokens": max_completion_tokens,
+            "n": 1,
+        }
+        if reasoning_config is not None:
+            create_kwargs["extra_body"] = {"reasoning": reasoning_config}
+        response = client.chat.completions.create(**create_kwargs)
         content = response.choices[0].message.content
         return content.strip() if isinstance(content, str) else str(content)
 
@@ -968,6 +1048,20 @@ def infer_adv_mode(cases_path: str, diagnose_predictions_csv: str) -> bool:
     return False
 
 
+def model_output_slug(model_config: Dict[str, str]) -> str:
+    if model_config.get("type") != "openrouter":
+        return ""
+    model_name = model_config.get("model_name", "")
+    return model_name.split("/")[-1].lower()
+
+
+def insert_model_slug_into_path(path: str, slug: str) -> str:
+    if not slug:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}-{slug}{ext}"
+
+
 def maybe_switch_default_output_paths(args: argparse.Namespace) -> None:
     if not infer_adv_mode(args.cases_path, args.diagnose_predictions_csv):
         return
@@ -1115,6 +1209,8 @@ def evaluate_model(
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
     openrouter_max_concurrency: int,
+    max_reasoning_tokens: Optional[int],
+    reasoning_effort: Optional[str],
 ) -> Dict[str, pd.DataFrame]:
     scorer: Optional[EntailmentScorer] = None
     try:
@@ -1145,6 +1241,8 @@ def evaluate_model(
                 hosted_base_url,
                 model_config["type"],
                 openrouter_max_concurrency,
+                max_reasoning_tokens,
+                reasoning_effort,
             )
 
         log_progress(f"[{model_config['model_name']}] Loading entailment scorer")
@@ -1273,6 +1371,8 @@ def run_model_subprocess(
     hf_enforce_eager: bool,
     hf_max_num_seqs: int,
     openrouter_max_concurrency: int,
+    max_reasoning_tokens: Optional[int],
+    reasoning_effort: Optional[str],
 ) -> None:
     try:
         log_progress(f"[{model_config['model_name']}] Loading evaluation dataset")
@@ -1288,6 +1388,8 @@ def run_model_subprocess(
             hf_enforce_eager,
             hf_max_num_seqs,
             openrouter_max_concurrency,
+            max_reasoning_tokens,
+            reasoning_effort,
         )
 
         predictions = outputs["predictions"]
@@ -1333,6 +1435,8 @@ def main() -> None:
         raise ValueError("--diagnostics_only requires --prediction_file or --diagnose-predictions-csv.")
     maybe_switch_default_output_paths(args)
 
+    active_model_names = parse_model_overrides(args.models) if args.models else model_names
+
     if not 0.0 <= args.similarity_threshold <= 1.0:
         raise ValueError("--similarity-threshold must be between 0 and 1.")
     if args.subprocess_timeout_seconds < 0.0:
@@ -1358,8 +1462,8 @@ def main() -> None:
             else ""
         )
     )
-    requires_openai_key = any(model_config.get("type") == "openai" for model_config in model_names)
-    requires_openrouter_key = any(model_config.get("type") == "openrouter" for model_config in model_names)
+    requires_openai_key = any(model_config.get("type") == "openai" for model_config in active_model_names)
+    requires_openrouter_key = any(model_config.get("type") == "openrouter" for model_config in active_model_names)
     if requires_openai_key and not openai_api_key:
         raise ValueError("This run includes OpenAI models. Provide --openai-api-key or set OPENAI_API_KEY.")
     if requires_openrouter_key and not (cli_api_key or openrouter_env_key):
@@ -1390,15 +1494,24 @@ def main() -> None:
     eval_df.to_json(temp_eval_df_path, orient="records")
 
     ctx = multiprocessing.get_context("spawn")
-    for model_config in model_names:
+    saved_output_paths: List[Tuple[str, str, str]] = []
+    for model_config in active_model_names:
+        slug = model_output_slug(model_config)
+        predictions_csv = insert_model_slug_into_path(args.predictions_csv, slug)
+        results_csv = insert_model_slug_into_path(args.results_csv, slug)
+        diagnostics_csv = insert_model_slug_into_path(args.diagnostics_csv, slug)
+        ensure_parent_dir(predictions_csv)
+        ensure_parent_dir(results_csv)
+        ensure_parent_dir(diagnostics_csv)
+
         proc = ctx.Process(
             target=run_model_subprocess,
             args=(
                 model_config,
                 temp_eval_df_path,
-                args.predictions_csv,
-                args.results_csv,
-                args.diagnostics_csv,
+                predictions_csv,
+                results_csv,
+                diagnostics_csv,
                 openai_api_key,
                 openai_base_url,
                 args.similarity_threshold,
@@ -1407,6 +1520,8 @@ def main() -> None:
                 args.hf_enforce_eager,
                 args.hf_max_num_seqs,
                 args.openrouter_max_concurrency,
+                args.max_reasoning_tokens,
+                args.reasoning_effort,
             ),
         )
         proc.start()
@@ -1425,13 +1540,15 @@ def main() -> None:
         if exit_code not in {0, None}:
             print(f"Subprocess for {model_config['model_name']} exited with code {exit_code}")
         print(f"Completed {model_config['model_name']}")
+        saved_output_paths.append((predictions_csv, results_csv, diagnostics_csv))
 
     if os.path.exists(temp_eval_df_path):
         os.remove(temp_eval_df_path)
 
-    print(f"Saved per-example predictions to: {args.predictions_csv}")
-    print(f"Saved summary results to: {args.results_csv}")
-    print(f"Saved per-example diagnostics to: {args.diagnostics_csv}")
+    for predictions_csv, results_csv, diagnostics_csv in saved_output_paths:
+        print(f"Saved per-example predictions to: {predictions_csv}")
+        print(f"Saved summary results to: {results_csv}")
+        print(f"Saved per-example diagnostics to: {diagnostics_csv}")
 
 
 if __name__ == "__main__":
